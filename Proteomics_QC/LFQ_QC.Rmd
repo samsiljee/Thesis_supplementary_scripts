@@ -1,0 +1,1101 @@
+---
+title: "MS LFQ QC (Proteome Discoverer)"
+author: "Sam Siljee"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages
+library(dplyr) # Pipe and data manipulation
+library(tidyr) # For pivot_wider call in PSM counts
+library(stringr) # Edit sample names in missed cleavages plot
+library(ggplot2) # Graphing
+library(ggridges) # ridgeline plots
+library(vroom) # fast data reading
+library(ggVennDiagram) # Make Venn diagrams
+library(ComplexHeatmap) # Make heatmaps
+library(rawrr) # Extract data for chromatograms
+library(MSstats) # To make profile plots for proteins of interest
+library(rstatix) # Run ANOVA tests
+library(ggpubr) # Add significance to plots
+
+# Set output directory
+output_dir <- paste0(getwd(), "/../produced_plots/MS_QC/LFQ/")
+input_dir <- paste0(getwd(), "/data/LFQ/")
+plot_width <- 8
+plot_height <- 5.5
+annotations_file <- "run_annotations.tsv"
+final_proteins_file <- "LFQ_TMT_common_differential_proteins.txt"
+sample_prep_file <- "sample_prep.csv"
+Gene_symbol_map <- "gene_symbol_map.tsv"
+
+# Options with running the script
+run_chromatograms <- FALSE
+load_from_rda <- TRUE
+```
+
+## Load data
+```{r load final LFQ data, include = FALSE}
+# Load custom functions
+source(paste0(input_dir, "../../../Functions.R"))
+
+# Load data from .rda files, or from .txt files - depending on options
+if (load_from_rda) {
+  # Load pre-prepared data
+  rda_files <- c(
+    "Run_annotations.rda",
+    "PSMs.rda",
+    "ProteinGroups.rda",
+    "Proteins.rda",
+    "PeptideGroups.rda",
+    "MSMSSpectrumInfo.rda",
+    "LFQ_processed.rda",
+    "LFQ_processed_no_normalisation.rda"
+  )
+  for (i in rda_files) {
+    load(paste0(input_dir, i))
+  }
+  
+  # Load chromatogram data if required
+  if(run_chromatograms) {
+    load(paste0(input_dir, "chrom_data.rda"))
+  }
+  
+} else { # Else load data from .txt files
+  # Load PD LFQ output from txt files
+  files_list <- list.files(input_dir, full.names = TRUE)
+  
+  # Get lists of PSM and protein groups files separately
+  PSM_files <- grep(files_list, pattern = "_PSMs.txt$", value = TRUE)
+  PG_files <- grep(files_list, pattern = "_ProteinGroups.txt$", value = TRUE)
+  Proteins_files <- grep(files_list, pattern = "_Proteins.txt$", value = TRUE)
+  PeptideGroups_files <- grep(files_list, pattern = "_PeptideGroups.txt$", value = TRUE)
+  MSMSSpectrumInfo_files <- grep(files_list, pattern = "_MSMSSpectrumInfo.txt$", value = TRUE)
+  
+  # Load run summary to use as annontations file, add "Path" column to merge with other datasets
+  Run_annotations <- read.delim(paste0(input_dir, annotations_file), header = TRUE) %>%
+    mutate(
+      # Add column to match up to protein and peptide groups files
+      PG_path = paste0(
+        input_dir,
+        "/",
+        gsub(".raw", "", Run),
+        "_ProteinGroups.txt"
+      ),
+      Protein_path = paste0(
+        input_dir,
+        "/",
+        gsub(".raw", "", Run),
+        "_Proteins.txt"
+      ),
+      PeptideGroups_path = paste0(
+        input_dir,
+        "/",
+        gsub(".raw", "", Run),
+        "_PeptideGroups.txt"
+      ),
+      # Add columns useful for annotation
+      Donor = gsub(" pLL3.7", "", gsub(" pLVUHshp53", "", Sample)),
+      Condition = ifelse(grepl(" pLVUHshp53", Sample), "p53 KD", "Control"),
+    ) %>%
+    # Convert some columns to factors for faster computation
+    mutate(
+      across(
+        c(
+          Batch,
+          Key,
+          Sample,
+          Run,
+          Donor,
+          Condition
+        ),
+        as.factor
+      )
+    )
+  # Save as r data file for faster loading in future
+  save(Run_annotations, file = paste0(input_dir, "Run_annotations.rda"))
+  
+  # Load PSM data
+  PSMs <- data.frame()
+  for (i in PSM_files) {
+    PSMs <- bind_rows(PSMs, vroom(i))
+  }
+  # Combine with annotations
+  PSMs <- merge(
+    PSMs,
+    mutate(Run_annotations, "Spectrum File" = paste0(Run, ".raw")),
+    by = "Spectrum File",
+    all.x = TRUE
+  )
+  # Save as r data file for faster loading in future
+  save(PSMs, file = paste0(input_dir, "PSMs.rda"))
+  
+  # Load protein group data
+  ProteinGroups <- data.frame()
+  for (i in PG_files) {
+    ProteinGroups <- bind_rows(ProteinGroups, mutate(vroom(i), Path = i))
+  }
+  # Combine with annotations
+  ProteinGroups <- merge(
+    ProteinGroups,
+    Run_annotations,
+    by.x = "Path",
+    by.y = "PG_path",
+    all.x = TRUE
+  )
+  # Save as r data file for faster loading in future
+  save(ProteinGroups, file = paste0(input_dir, "ProteinGroups.rda"))
+  
+  # Load protein group data
+  Proteins <- data.frame()
+  for (i in Proteins_files) {
+    Proteins <- bind_rows(Proteins, mutate(vroom(i), Path = i))
+  }
+  # Combine with annotations
+  Proteins <- merge(
+    Proteins,
+    Run_annotations,
+    by.x = "Path",
+    by.y = "Protein_path",
+    all.x = TRUE
+  )
+  # Save as r data file for faster loading in future
+  save(Proteins, file = paste0(input_dir, "Proteins.rda"))
+  
+  # Load pepetide group data
+  PeptideGroups <- data.frame()
+  for (i in PeptideGroups_files) {
+    PeptideGroups <- bind_rows(PeptideGroups, mutate(vroom(i), Path = i))
+  }
+  # Combine with annotations
+  PeptideGroups <- merge(
+    PeptideGroups,
+    Run_annotations,
+    by.x = "Path",
+    by.y = "PeptideGroups_path",
+    all.x = TRUE
+  )
+  # Save as r data file for faster loading in future
+  save(PeptideGroups, file = paste0(input_dir, "PeptideGroups.rda"))
+  
+  # Load spectrum information data
+  MSMSSpectrumInfo <- data.frame()
+  for (i in MSMSSpectrumInfo_files) {
+    MSMSSpectrumInfo <- bind_rows(MSMSSpectrumInfo, mutate(vroom(i), Path = i))
+  }
+  # Combine with annotations
+  MSMSSpectrumInfo <- merge(
+    MSMSSpectrumInfo,
+    mutate(Run_annotations, "Spectrum File" = paste0(Run, ".raw")),
+    by = "Spectrum File",
+    all.x = TRUE
+  )
+  # Save as r data file for faster loading in future
+  save(MSMSSpectrumInfo, file = paste0(input_dir, "MSMSSpectrumInfo.rda"))
+  
+  # Load data if running chromatograms
+  if (run_chromatograms) {
+    # Load chromatogram data
+    raw_files <- list.files(input_dir, full.names = TRUE) %>%
+      grep(pattern = ".raw$", value = TRUE)
+    
+    # Initialise data.frame
+    chrom_data <- data.frame()
+    
+    # Read in raw files and extract TIC values to data.frame
+    for (i in raw_files) {
+      # Open file
+      tic <- rawrr::readChromatogram(rawfile = i, type = "tic")
+      bpc <- rawrr::readChromatogram(rawfile = i, type = "bpc")
+      
+      chrom_data <- rbind(
+        chrom_data,
+        data.frame(
+          TIC = tic$intensities,
+          BP = bpc$intensities,
+          RT = as.numeric(tic$times),
+          raw_path = i
+        )
+      )
+    }
+    
+    # Merge with run overview data for annotations
+    chrom_data <- merge(
+      chrom_data,
+      mutate(
+        Run_annotations,
+        # Add column to match up to protein groups files
+        raw_path = paste0(input_dir, "/", Run, ".raw")
+      ),
+      by = "raw_path",
+      all.x = TRUE
+    )
+    
+    # Save as R data for faster loading in future
+    save(chrom_data, file = paste0(input_dir, "chrom_data.rda"))
+  }
+}
+
+# Read in list of final proteins of interest
+final_proteins <- readLines(paste0(input_dir, final_proteins_file))
+
+# Load the gene symbols map
+gene_symbols_map <- read.delim(paste0(input_dir, Gene_symbol_map), header = TRUE, sep = "\t")
+
+# Load sample pre data
+sample_prep_data <- read.delim(paste0(input_dir, sample_prep_file), header = TRUE, sep = ",") %>%
+  merge(
+    unique(dplyr::select(Run_annotations, Key, Donor, Condition)),
+    by.x = "Sample",
+    by.y = "Key",
+    all.x = TRUE
+  ) %>%
+  mutate(Sample = paste(Donor, Condition, sep = "_"))
+
+# Create run summaries
+# Count number of proteins per run
+PG_summary <- ProteinGroups %>%
+  group_by(Run) %>%
+  summarise("Protein groups" = length(unique(`Protein Groups Protein Group ID`)))
+
+# Count number of PSMs per run
+PSM_summary <- PSMs %>%
+  group_by(Run) %>%
+  summarise("PSMs" = n())
+
+# Count number of spectra per run
+MSMSSpectrumInfo_summary <- MSMSSpectrumInfo %>%
+  group_by(Run) %>%
+  summarise("Spectra" = n())
+
+# Count number of proteins per run
+Proteins_summary <- Proteins %>%
+  group_by(Run) %>%
+  summarise("Proteins" = n())
+
+# Combine with Run_annotations and select desired columns
+Run_summary <- merge(
+  PG_summary,
+  PSM_summary
+) %>%
+  merge(MSMSSpectrumInfo_summary) %>%
+  merge(Proteins_summary) %>%
+  merge(Run_annotations) %>%
+  mutate("Identification rate" = PSMs / Spectra) %>%
+  dplyr::select(Run, Sample, Donor, Condition, Key, Batch, Spectra, PSMs, `Identification rate`, `Protein groups`, Proteins)
+
+# Save as .csv file
+write.csv(Run_summary, paste0(output_dir, "Run_summary.csv"))
+
+# Summarise some results
+range(Run_summary$Proteins)
+mean(Run_summary$Proteins)
+```
+
+## Sample preparation
+Plot of final final sample prep yields. Data taken from "Colourimetric calculations 20241111.xlsx"
+```{r Sample prep}
+# Run some stats
+# Perform paired t-tests and print results for corrected ratio values
+yield_test <- t.test(
+  filter(sample_prep_data, Condition == "Control")$Yield,
+  filter(sample_prep_data, Condition == "p53 KD")$Yield,
+  paired = TRUE
+)
+interpret_t_test(yield_test, sample_prep_data, "Yield")
+
+# Plot with error bars
+sample_prep_data %>%
+  ggplot(aes(
+    x = Sample,
+    y = Yield,
+    fill = Sample
+  )) +
+  geom_col() +
+  geom_errorbar(aes(
+    ymin = Yield - Yield.SD,
+    ymax = Yield + Yield.SD),
+    width = 0.2) +
+  labs(
+    x = "Sample",
+    y = "Yield +/- standard deviation",
+    title = "Yield by sample"
+  ) +
+  scale_y_continuous(
+    labels = scales::percent,
+    limits = c(0, 1)
+  ) +
+  annotate("text", x = 3, y = 1, label = paste0("paired t-test, p = ", round(yield_test$p.value, 3))) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0
+    )
+  ) +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot standard size
+ggsave(paste0(output_dir, "Sample prep yield.png"), width = plot_width, height = plot_height)
+```
+
+## Missed Cleavages
+Plot of missed cleavages, from peptide groups level data
+```{r missed cleavages, echo = FALSE}
+# Make data summary
+missed_cleavages_summary <- PeptideGroups %>%
+  group_by(Donor, Condition) %>%
+  count(`# Missed Cleavages` = `# Missed Cleavages`) %>%
+  mutate(Percent = prop.table(n))
+
+# Perform paired t-tests and print results for corrected ratio values
+missed_cleavage_test <- t.test(
+  filter(missed_cleavages_summary, Condition == "Control" & `# Missed Cleavages` == 0)$Percent,
+  filter(missed_cleavages_summary, Condition == "p53 KD" & `# Missed Cleavages` == 0)$Percent,
+  paired = TRUE
+)
+interpret_t_test(missed_cleavage_test, filter(missed_cleavages_summary, `# Missed Cleavages` == 0), "Percent")
+
+# Run ANOVA for proportion fully tryptic by sample
+missed_cleavage_anova <- PeptideGroups %>%
+  group_by(Run, Sample) %>%
+  count(`# Missed Cleavages` = `# Missed Cleavages`) %>%
+  mutate(Percent = prop.table(n)) %>%
+  filter(`# Missed Cleavages` == 0) %>%
+  ungroup() %>%
+  anova_test(Percent ~ Sample)
+
+# Print results
+missed_cleavage_anova$p
+
+# Make plot
+PeptideGroups %>%
+  group_by(Run, Sample) %>%
+  count(`# Missed Cleavages` = `# Missed Cleavages`) %>%
+  mutate(Percent = prop.table(n), Sample = str_replace(Sample, " ", "_")) %>%
+  ggplot(aes(x = Sample, y = Percent, fill = Sample)) +
+  stat_summary(fun.data = mean_sd, geom = "bar") +
+  stat_summary(fun.data = mean_sd, geom = "errorbar", width = 0.2) +
+  stat_compare_means(
+    method = "anova",
+    aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
+  facet_wrap("`# Missed Cleavages`") +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  scale_x_discrete(
+    position = "bottom",
+    sec.axis = dup_axis(name = "Number of missed cleavages", labels = NULL)
+  ) +
+  labs(
+    title = "Missed cleavages",
+    x = "Sample",
+    y = "Proportion"
+  ) +
+  theme_bw() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank()) +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ missed cleavages.png"), width = plot_width, height = plot_height)
+```
+
+## Chromatograms
+```{r Chromatograms, include = FALSE}
+if(run_chromatograms) {
+  # Make the plot TIC chromatograms
+  chrom_data %>%
+    ggplot(aes(x = RT, y = TIC, col = Sample)) +
+    geom_line() +
+    scale_x_discrete(
+      position = "bottom",
+      sec.axis = dup_axis(name = "Batch", labels = NULL)
+    ) +
+    scale_y_discrete(
+      position = "left",
+      sec.axis = dup_axis(name = "Sample", labels = NULL)
+    ) +
+    labs(
+      title = "Total ion current chromatograms for LFQ runs",
+      x = "Retention time",
+      y = "Total ion current intensity"
+    ) +
+    facet_grid(Sample ~ Batch, scales = "free_y") +
+    theme_bw() +
+    theme(legend.position = "none") +
+    scale_colour_manual(name = "Sample", values = custom_colours)
+  
+  # Save the plot standard size
+  ggsave(paste0(output_dir, "TIC LFQ chromatograms.png"), width = plot_width, height = plot_height * 2)
+  
+  # Make the plot BP chromatograms
+  chrom_data %>%
+    ggplot(aes(x = RT, y = BP, col = Sample)) +
+    geom_line() +
+    scale_x_discrete(
+      position = "bottom",
+      sec.axis = dup_axis(name = "Batch", labels = NULL)
+    ) +
+    scale_y_discrete(
+      position = "left",
+      sec.axis = dup_axis(name = "Sample", labels = NULL)
+    ) +
+    labs(
+      title = "Base peak chromatograms for LFQ runs",
+      x = "Retention time",
+      y = "Base peak intensity"
+    ) +
+    facet_grid(Sample ~ Batch, scales = "free_y") +
+    theme_bw() +
+    theme(legend.position = "none") +
+    scale_colour_manual(name = "Sample", values = custom_colours)
+  
+  # Save the plot standard size
+  ggsave(paste0(output_dir, "BP LFQ chromatograms.png"), width = plot_width, height = plot_height * 2)
+}
+```
+
+## PSMs By RT
+Plot of peptide-spectrum matches by retention time. Coloured by run or condition
+```{r PSMs by retention time plot, echo = FALSE}
+# Make the plot by sample with facet grid by batch/sample
+PSMs %>%
+  ggplot(aes(x = `RT [min]`, color = Sample)) +
+  geom_density() +
+  scale_y_continuous(
+    name = "Peptide-spectrum matches",
+    breaks = NULL,
+    position = "left",
+    sec.axis = dup_axis(name = "Sample", labels = NULL)
+  ) +
+  scale_x_discrete(
+    position = "bottom",
+    sec.axis = dup_axis(name = "Batch", labels = NULL)
+  ) +
+  facet_grid(Sample ~ Batch, scales = "free_y") +
+  labs(
+    title = "PSMs by retention time for LFQ runs",
+    x = "Retention time",
+    y = "PSM identifications"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none") +
+  scale_colour_manual(name = "Sample", values = custom_colours)
+
+# Save the plot standard size
+ggsave(paste0(output_dir, "LFQ PSMs by RT.png"), width = plot_width, height = plot_height * 2)
+```
+
+## Peak widths
+My approach here is to get some extracted ion chromatograms and then measure peak width using full width half height.
+LFQ_peak_width_selection.R script used to determine the peptide to use.
+Use the peptide "[R].VATVSLPR.[S]" (from pig trypsin), RT ~40 minutes, m/z ~421.7584
+```{r}
+# List raw files
+raw_files <- list.files(input_dir, full.names = TRUE) %>%
+  grep(pattern = ".raw$", value = TRUE)
+
+# Initialise vector for peak widths
+peak_widths <- numeric(length = length(raw_files))
+names(peak_widths) <- raw_files
+
+# Loop through_files
+for(n in 1:length(raw_files)) {
+  print(paste0("Starting on run ", n, " of ", length(raw_files)))
+  i <- raw_files[n]
+  peak_width <- calculate_peak_width(
+    raw_file = i,
+    peak_mass = 421.7584,
+    tol = 5,
+    min_RT = 39.1 - 5,
+    max_RT = 39.1 + 5
+  )
+  
+  # Assign to vector
+  peak_widths[i] <- peak_width * 60
+}
+
+# Merge with annotations
+peak_widths <- merge(
+  mutate(
+    Run_annotations,
+    index = paste0(input_dir, "/", Run, ".raw")
+  ),
+  data.frame(
+    Peak_width = peak_widths,
+    index = names(peak_widths)
+  ),
+  by = "index"
+)
+
+# Run some stats
+# Run ANOVA for peak width by sample
+peak_widths %>%
+  anova_test(Peak_width ~ Sample) %>%
+  .$p
+
+# Run ANOVA for peak width by condition
+peak_widths %>%
+  anova_test(Peak_width ~ Condition) %>%
+  .$p
+
+# Run ANOVA for peak width by batch
+peak_widths %>%
+  anova_test(Peak_width ~ Batch) %>%
+  .$p
+
+# Get mean peak width
+mean(peak_widths$Peak_width)
+
+# Example extracted ion chromatogram
+XIC <- rawrr::readChromatogram(rawfile = raw_files[1], mass = 421.7584, tol = 5, type = "xic")
+
+# Extract to a data.frame and make plot
+data.frame(
+  RT = as.numeric(XIC[[1]]$times),
+  Intensity = XIC[[1]]$intensities
+) %>%
+  ggplot(aes(x = RT, y = Intensity)) +
+  geom_line() +
+  labs(
+    title = "Extracted-ion chromatogram m/z: 421.7584",
+    x = "Retention time"
+  ) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# Save the plot standard size
+ggsave(paste0(output_dir, "LFQ XIC.png"), width = plot_width, height = plot_height)
+
+# Box plot of frequencies by sample
+peak_widths %>%
+  ggplot(aes(x = Batch, y = Peak_width, fill = Batch)) +
+  geom_boxplot() +
+  stat_compare_means(
+    method = "anova",
+    aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
+  labs(
+    title = "Full width at half maximum (FWHM) peak widths for peptide  \"VATVSLPR\" in LFQ runs by batch",
+    x = "Batch",
+    y = "Peak width (seconds)"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ_peak_width_boxplot.png"), width = plot_width, height = plot_height)
+```
+
+## RT analysis
+Decided to run analysis as follows:
+1. Group PSMs by annotated sequence - get global mean RTs
+2. Group PSMs by run and annotated sequence, get run specific RTs
+3. Merge
+4. Subtract global means from run specific means and look at distribution
+```{r RT analysis}
+# Get global RT means
+glob_RT_means <- PSMs %>%
+  group_by(`Annotated Sequence`) %>%
+  summarise(glob_RT = mean(`RT [min]`, na.rm = TRUE), .groups = "drop")
+
+# Get run specific means and mean differences
+run_RT_means <- PSMs %>%
+  group_by(Run, `Annotated Sequence`) %>%
+  summarise(run_RT = mean(`RT [min]`, na.rm = TRUE), .groups = "drop") %>%
+  merge(glob_RT_means, by = "Annotated Sequence", all.x = TRUE) %>%
+  mutate(RT_dif = run_RT - glob_RT) %>%
+  merge(Run_annotations, all.x = TRUE)
+
+# Run ANOVA for proportion for RT differences by run
+RT_anova <- run_RT_means %>%
+  anova_test(RT_dif ~ Run)
+
+# Print results
+RT_anova$p
+
+# Print mean absolute retention time differences
+mean(abs(run_RT_means$RT_dif))
+
+# Print proportion of absolute delta RT less than 5 minutes
+mean(abs(run_RT_means$RT_dif) < 5)
+mean(abs(run_RT_means$RT_dif) < 0.5)
+
+# Ridgeline plot of peak width by batch
+run_RT_means %>%
+  filter(RT_dif < 2 & RT_dif > -2) %>%
+  ggplot(aes(x = RT_dif, y = Batch, fill = Batch)) +
+  geom_density_ridges() +
+  facet_wrap("Sample") +
+  labs(
+    title = "Peptide retention time differences by run",
+    x = "Peptide retention time difference relative to overall mean (minutes)",
+    y = "Density"
+  ) +
+  scale_y_discrete(limits = rev) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ RT difference ridgeline plot.png"), width = plot_width, height = plot_height * 2)
+```
+
+## Protein identifications by Sample
+```{r Protein identifications by key}
+# Summarise counts from PSM data
+ID_counts <- PSMs %>%
+  dplyr::select(c(Run, `Master Protein Accessions`)) %>%
+  unique() %>%
+  group_by(Run) %>%
+  summarise(Protein_count = n()) %>%
+  merge(Run_annotations, by = "Run")
+
+# Run stats and averages
+ID_test <- ID_counts %>%
+  anova_test(Protein_count ~ Batch)
+ID_test$p
+round(mean(ID_counts$Protein_count))
+
+# Make a plot
+ID_counts %>%
+  ggplot(aes(x = Sample, y = Protein_count, col = Batch)) +
+  geom_point() +
+  annotate("text", x = 3, y = 5000, label = paste0("ANOVA, p = ", round(ID_test$p, 3))) +
+  expand_limits(y = 0) +
+  ggtitle("Identifications by run") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0, hjust = 1)
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ IDs by run.png"), width = plot_width, height = plot_height)
+```
+
+## Mass Error
+Plot of mass error by run
+```{r precursor mass error, echo = FALSE}
+# Run ANOVA for proportion for mass error by batch
+# Summarise data - arbitrary significance from large sample size
+mass_er_summary <- PSMs %>%
+  group_by(Run, Batch) %>%
+  summarise(
+    mz = mean(`Deltam/z [Da]`),
+    ppm = mean(`DeltaM [ppm]`),
+    .groups = "drop"
+  )
+
+# Run ANOVA for m/z
+mz_anova <- mass_er_summary %>%
+  anova_test(mz ~ Batch)
+mz_anova$p
+
+# Run ANOVA for ppm
+ppm_anova <- mass_er_summary %>%
+  anova_test(ppm ~ Batch)
+ppm_anova$p
+
+# Summaries
+mean(PSMs$`Deltam/z [Da]`)
+sd(PSMs$`Deltam/z [Da]`)
+mean(PSMs$`DeltaM [ppm]`)
+sd(PSMs$`DeltaM [ppm]`)
+
+# Mean absolute errors
+mean(abs(PSMs$`Deltam/z [Da]`))
+mean(abs(PSMs$`DeltaM [ppm]`))
+mean(abs(PSMs$`DeltaM [ppm]`) < 1)
+
+# Density plot of precursor mass error - PSM level
+PSMs %>%
+  ggplot(aes(x = `Deltam/z [Da]`, colour = Batch)) +
+  geom_density(alpha = 0.2) +
+  labs(
+    title = "Mass error - PSM level by run, LFQ data",
+    x = expression(~Delta ~ "m/z (Da)"),
+    y = "Density") +
+  facet_wrap("Sample", scales = "free_y") +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ PSM mass error by run.png"), width = plot_width, height = plot_height)
+
+# Density plot of precursor mass error - PSM level - by Batch - ppm
+PSMs %>%
+  ggplot(aes(x = `DeltaM [ppm]`, colour = Batch)) +
+  geom_density(alpha = 0.2) +
+  labs(
+    title = "Mass error - PSM level by run, LFQ data",
+    x = expression(~Delta ~ "m/z (ppm)"),
+    y = "Density") +
+  facet_wrap("Sample", scales = "free_y") +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ PSM mass error by run ppm.png"), width = plot_width, height = plot_height)
+```
+
+## Venn diagrams - reproducibility
+```{r}
+# Loop through all samples
+for(i in Run_annotations$Sample){
+  # Filter data and make a list of unique proteins in each replicate
+  venn_list <- PSMs %>%
+    filter(Sample == i) %>%
+    dplyr::select(c(Batch, `Master Protein Accessions`)) %>%
+    unique() %>%
+    split(.$Batch) %>%
+    lapply(function(df) {
+      df %>%
+        dplyr::select(`Master Protein Accessions`) %>%
+        pull()
+    })
+  
+  # make the plot
+  ggVennDiagram(venn_list) +
+    theme_void() +
+    labs(
+      title = paste0(i, " technical replicate overlap")
+      ) +
+    ggplot2::scale_fill_gradient(low = "white", high = "red")
+  
+  # Save the plot
+  ggsave(paste0(output_dir, i, " venn diagram.png"), width = plot_width, height = plot_height)
+}
+```
+
+## Missing values
+Look at imputation numbers from MSstats - present as heatmap
+```{r missing values heatmap}
+# Overview of imputation numbers
+MSstats_processed$ProteinLevelData %>%
+  mutate(imputation = NumImputedFeature/(NumImputedFeature + NumMeasuredFeature)) %>%
+  .$imputation %>%
+  mean
+
+# Create the heatmap
+# Create the presence/absence matrix, summarise to sample-level using identification in at least one run.
+heatmap_data <- MSstats_processed$ProteinLevelData %>%
+  mutate(Run = originalRUN) %>%
+  merge(
+    mutate(Run_annotations, Run = paste0(Run, "raw")),
+    by = "Run"
+  ) %>%
+  dplyr::select(Sample, Protein) %>%
+  unique() %>%
+  mutate(Present = TRUE) %>%
+  complete(Sample, Protein, fill = list(Present = FALSE))
+
+# Convert to wide format for clustering
+wide_matrix <- heatmap_data %>%
+  pivot_wider(names_from = Sample, values_from = Present, values_fill = FALSE) %>%
+  tibble::column_to_rownames("Protein") %>%
+  as.matrix()
+
+# Perform hierarchical clustering on proteins (rows)
+protein_dist <- dist(wide_matrix * 1, method = "binary")  # binary distance for TRUE/FALSE
+protein_hclust <- hclust(protein_dist)
+protein_order <- rownames(wide_matrix)[protein_hclust$order]
+
+# calculate proportion missing values
+signif(mean(!wide_matrix) * 100, digits = 3)
+
+# Plot with ordered proteins
+heatmap_data %>%
+  mutate(Protein = factor(Protein, levels = protein_order)) %>%
+  ggplot(aes(x = Sample, y = Protein, fill = Present)) +
+  geom_tile() +
+  scale_fill_manual(values = c("TRUE" = "black", "FALSE" = "white")) +
+  theme_bw() +
+  labs(
+    x = "Sample",
+    y = "Protein",
+    fill = "Identified",
+    title = "Protein identification missing values") +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.text.y = element_blank(),
+    panel.grid = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ missing values heatmap.png"), width = plot_width, height = plot_height)
+```
+
+## Normalisation
+```{r Normalisation}
+# Protein level normalisation plots
+# Prepare the data
+norm_data <- rbind(
+  mutate(
+    MSstats_processed$ProteinLevelData,
+    Normalisation = "Normalised"
+  ),
+  mutate(
+    MSstats_processed_no_normalisation$ProteinLevelData,
+    Normalisation = "Original"
+  )
+) %>%
+  dplyr::select(c(originalRUN, LogIntensities, Normalisation))
+
+# Make the plot
+norm_data %>%
+  ggplot(aes(x = as.numeric(originalRUN), y = LogIntensities, fill = originalRUN)) +
+  geom_boxplot() +
+  stat_compare_means(
+    method = "anova",
+    label.x = 6,
+    aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
+  facet_wrap("Normalisation") +
+  scale_x_continuous(breaks = 1:64) +
+  labs(
+    x = "Run",
+    y = "Protein-level abundance",
+    title = "Protein level LFQ protein abundances by run",
+    fill = "Donor"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0
+    ),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ protein level run intensities.png"), width = plot_width, height = plot_height)
+```
+
+## Precursor charge
+```{r Precursor charge}
+PSMs %>%
+  mutate(Charge = as.factor(Charge)) %>%
+  group_by(Run, Charge) %>%
+  summarise(count = n()) %>%
+  group_by(Charge) %>%
+  summarise(Proportion = sum(count), SD = sd(count)) %>%
+  mutate(Proportion = Proportion / nrow(PSMs), SD = SD / nrow(PSMs)) %>%
+  ggplot(aes(x = Charge, y = Proportion, ymin = Proportion - SD, ymax = Proportion + SD, fill = Charge)) +
+  geom_col() +
+  geom_errorbar(width = 0.2) +
+  scale_y_continuous(
+    limits = c(0, 0.7),
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(
+    x = "Precursor charge",
+    y = "Proportion of PSMs",
+    title = "LFQ precursor charge distribution"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ precursor charge.png"), width = plot_width, height = plot_height)
+```
+
+## Peptide length
+```{r}
+# Summarise data
+peptide_lengths <- PSMs %>%
+  mutate(
+    Length = as.factor(nchar(gsub("^\\[.*?\\].|.\\[.*?\\]$", "", `Annotated Sequence`)))) %>%
+  group_by(Run, Length) %>%
+  summarise(count = n()) %>%
+  group_by(Length) %>%
+  summarise(Proportion = sum(count), SD = sd(count)) %>%
+  mutate(Proportion = Proportion / nrow(PSMs), SD = SD / nrow(PSMs))
+
+# Present most common length
+peptide_lengths[which.max(peptide_lengths$Proportion),]
+sum(as.numeric(peptide_lengths$Length) * peptide_lengths$Proportion, na.rm = TRUE)
+
+# Make a plot
+peptide_lengths %>%
+  ggplot(aes(x = Length, y = Proportion, ymin = Proportion - SD, ymax = Proportion + SD, fill = Length)) +
+  geom_col() +
+  geom_errorbar(width = 0.2) +
+  scale_y_continuous(
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(
+    x = "Peptide length",
+    y = "Proportion of PSMs",
+    title = "Peptide length - LFQ runs"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ peptide lengths.png"), width = plot_width, height = plot_height)
+```
+
+## Unique peptides
+```{r}
+# Get some stats
+mean(Proteins$`# Unique Peptides` == 0) * 100
+mean(Proteins$`# Unique Peptides` == 1) * 100
+
+# Summarise the data
+unique_peptides <- Proteins %>%
+  group_by(Run, `# Unique Peptides`) %>%
+  mutate(`# Unique Peptides` = as.factor(
+    ifelse(as.numeric(`# Unique Peptides`) >= 20, "20+", as.character(`# Unique Peptides`))
+  )) %>%
+  summarise(count = n()) %>%
+  group_by(`# Unique Peptides`) %>%
+  summarise(Proportion = sum(count), SD = sd(count)) %>%
+  mutate(Proportion = Proportion / nrow(Proteins), SD = SD / nrow(Proteins))
+
+# Make a plot
+unique_peptides %>%
+  ggplot(aes(x = `# Unique Peptides`, y = Proportion, ymin = Proportion - SD, ymax = Proportion + SD, fill = `# Unique Peptides`)) +
+  geom_col() +
+  geom_errorbar(width = 0.2) +
+  scale_y_continuous(
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(
+    x = "Number of unique peptides per protein",
+    y = "Proportion of identified proteins",
+    title = "Protein unique peptide counts - LFQ runs"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ unique peptides.png"), width = plot_width, height = plot_height)
+```
+
+## Protein coverage
+```{r}
+mean(Proteins$`Coverage [%]`)
+mean(Proteins$`Coverage [%]` > 3.74)
+
+# Density plot of protein coverage
+Proteins %>%
+  ggplot(aes(x = `Coverage [%]`)) +
+  geom_density() +
+  labs(
+    x = "Protein sequence coverage (%)",
+    y = "Density",
+    title = "Protein sequence coverage - LFQ runs"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ protein coverage.png"), width = plot_width, height = plot_height)
+```
+
+## Sequest score
+```{r}
+mean(Proteins$`Score Sequest HT: Sequest HT`)
+
+# Density plot of protein coverage
+Proteins %>%
+  ggplot(aes(x = `Score Sequest HT: Sequest HT`)) +
+  geom_density() +
+  scale_x_continuous(trans = "log2") +
+  labs(
+    x = "Sequest HT score (log 2 scale)",
+    y = "Density",
+    title = "Sequest HT scores - LFQ runs"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ SEQUEST scores.png"), width = plot_width, height = plot_height)
+```
+
+## UNUSED CODES
+Codes for older plots, no longer required.
+
+## PTM distribution
+Code to test out the distribution of PTMs found in the PSMs. Used to justify which to include in the final search.
+```{r PTM distribution}
+# Load list of searched modifications
+modifications_list <- readLines("data/modifications_list.txt")
+# Load the data - select modifications
+modifications_data <- vroom("data/PTM_optimistation_PSMs.txt") %>% .$Modifications
+# Get total numbers for ratio calculations
+number_of_PSMs <- length(modifications_data)
+# Calculate the numbers of times that modifications occur
+# Do the counting
+counts <- numeric()
+for (i in modifications_list) {
+  count <- sum(grepl(i, modifications_data))
+  counts <- c(counts, count)
+}
+# Make a data frame and plot
+data.frame(
+  Modification = modifications_list,
+  Proportion = counts / number_of_PSMs
+) %>%
+  ggplot(aes(x = Modification, y = Proportion, fill = Modification)) +
+  geom_col() +
+  ggtitle("Rates of modification of PSMs by modification") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# Save the plot
+ggsave(paste0(output_dir, "modifications.png"), width = plot_width, height = plot_height)
+```
+
+## Identification Efficiency
+```{r identification efficiency, echo = FALSE}
+# Count PSMs
+TotalPSMs <- PSMs %>%
+  group_by(`Spectrum File`) %>%
+  summarise(PSMs = n())
+
+# Count spectra
+TotalSpectra <- MSMSSpectrumInfo %>%
+  group_by(`Spectrum File`) %>%
+  summarise(Spectra = n())
+
+# Combine and calculate
+EfficiencyTab <- merge(TotalPSMs, TotalSpectra, by = "Spectrum File") %>%
+  mutate("Identification rate" = paste(round(PSMs / Spectra * 100, 1), "%"))
+
+# Display as table
+knitr::kable(EfficiencyTab)
+```

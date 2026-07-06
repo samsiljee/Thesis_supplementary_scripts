@@ -1,0 +1,331 @@
+---
+title: "Lysis, digestion, desalting"
+author: "Sam Siljee"
+date: "2025-09-29"
+output: html_document
+---
+
+Script to run some stats for lysis, digestion, and desalting numbers
+
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages
+library(dplyr) # Data manipulation
+library(tidyr) # pivot_longer
+library(ggplot2) # Plotting
+library(ggpubr) # Add significance to plots
+library(rstatix) # Run ANOVA tests
+
+# Files and directories
+lysis_file <- "lysate.tsv"
+plot_width <- 8
+plot_height <- 5.5
+use_summarised_results <- FALSE
+if(use_summarised_results) {
+  input_dir <- paste0(getwd(), "/data/")
+  output_dir <- paste0(getwd(), "/../produced_plots/MS_QC/sample_prep/")
+  digest_desalting_file <- "desalting_digestion.tsv"
+} else {
+  load_from_rda <- TRUE
+  annotations_file <- "optimisation_annotations.tsv"
+  input_dir <- paste0(getwd(), "/data/sample_prep_optimisation/")
+  output_dir <- paste0(getwd(), "/../produced_plots/MS_QC/sample_prep/")
+}
+```
+
+# Load data
+```{r}
+# Load lysis concentration data
+lysate_dat <- read.table(
+  paste0(input_dir, lysis_file),
+  sep = "\t",
+  header = TRUE
+)
+
+# Load the other data
+if(use_summarised_results) { # Load data from summary tables
+  digest_dat <- read.table(
+    paste0(input_dir, digest_desalting_file),
+    sep = "\t",
+    header = TRUE
+  )
+} else { # Load data from .txt results - like in final proteomics QC
+  if (load_from_rda) {
+    # Load pre-prepared data
+    rda_files <- c(
+      "Run_annotations.rda",
+      "PSMs.rda",
+      "PGs.rda",
+      "PeptideGroups.rda",
+      "MSMSSpectrumInfo.rda"
+    )
+    for (i in rda_files) {
+      load(paste0(input_dir, i))
+    }
+    
+  } else { # Else load data from .txt files
+    # Load PD LFQ output from txt files
+    files_list <- list.files(input_dir, full.names = TRUE)
+    
+    # Get lists of PSM and protein groups files separately
+    PSM_files <- grep(files_list, pattern = "_PSMs.txt$", value = TRUE)
+    PG_files <- grep(files_list, pattern = "_ProteinGroups.txt$", value = TRUE)
+    PeptideGroups_files <- grep(files_list, pattern = "_PeptideGroups.txt$", value = TRUE)
+    MSMSSpectrumInfo_files <- grep(files_list, pattern = "_MSMSSpectrumInfo.txt$", value = TRUE)
+    
+    # Load run summary to use as annontations file, add "Path" column to merge with other datasets
+    Run_annotations <- read.delim(paste0(input_dir, annotations_file), header = TRUE) %>%
+      mutate(
+        # Add column to match up to protein and peptide groups files
+        PG_path = paste0(
+          input_dir,
+          gsub(".raw", "", Run),
+          "_ProteinGroups.txt"
+        ),
+        PeptideGroups_path = paste0(
+          input_dir,
+          gsub(".raw", "", Run),
+          "_PeptideGroups.txt"
+        ),
+      ) %>%
+      # Convert some columns to factors for faster computation
+      mutate(
+        across(
+          c(
+            Run,
+            Sample,
+            Enzyme,
+            Desalting
+          ),
+          as.factor
+        )
+      )
+    # Save as r data file for faster loading in future
+    save(Run_annotations, file = paste0(input_dir, "Run_annotations.rda"))
+    
+    # Load PSM data
+    PSMs <- data.frame()
+    for (i in PSM_files) {
+      PSMs <- bind_rows(PSMs, vroom(i))
+    }
+    # Combine with annotations
+    PSMs <- merge(
+      PSMs,
+      mutate(Run_annotations, "Spectrum File" = paste0(Run, ".raw")),
+      by = "Spectrum File",
+      all.x = TRUE
+    )
+    # Save as r data file for faster loading in future
+    save(PSMs, file = paste0(input_dir, "PSMs.rda"))
+    
+    # Load protein group data
+    PGs <- data.frame()
+    for (i in PG_files) {
+      PGs <- bind_rows(PGs, mutate(vroom(i), Path = i))
+    }
+    # Combine with annotations
+    PGs <- merge(
+      PGs,
+      Run_annotations,
+      by.x = "Path",
+      by.y = "PG_path",
+      all.x = TRUE
+    )
+    # Save as r data file for faster loading in future
+    save(PGs, file = paste0(input_dir, "PGs.rda"))
+    
+    # Load pepetide group data
+    PeptideGroups <- data.frame()
+    for (i in PeptideGroups_files) {
+      PeptideGroups <- bind_rows(PeptideGroups, mutate(vroom(i), Path = i))
+    }
+    # Combine with annotations
+    PeptideGroups <- merge(
+      PeptideGroups,
+      Run_annotations,
+      by.x = "Path",
+      by.y = "PeptideGroups_path",
+      all.x = TRUE
+    )
+    # Save as r data file for faster loading in future
+    save(PeptideGroups, file = paste0(input_dir, "PeptideGroups.rda"))
+    
+    # Load spectrum information data
+    MSMSSpectrumInfo <- data.frame()
+    for (i in MSMSSpectrumInfo_files) {
+      MSMSSpectrumInfo <- bind_rows(MSMSSpectrumInfo, mutate(vroom(i), Path = i))
+    }
+    # Combine with annotations
+    MSMSSpectrumInfo <- merge(
+      MSMSSpectrumInfo,
+      mutate(Run_annotations, "Spectrum File" = paste0(Run, ".raw")),
+      by = "Spectrum File",
+      all.x = TRUE
+    )
+    # Save as r data file for faster loading in future
+    save(MSMSSpectrumInfo, file = paste0(input_dir, "MSMSSpectrumInfo.rda"))
+  }
+}
+```
+
+# Process the data
+```{r}
+# Summarise data
+# Count number of proteins per run
+PG_summary <- PGs %>%
+  group_by(Run) %>%
+  summarise("Protein groups" = length(unique(`Protein Groups Protein Group ID`)))
+
+# Count number of PSMs per run
+PSM_summary <- PSMs %>%
+  group_by(Run) %>%
+  summarise("PSMs" = n())
+
+# Combine with Run_annotations and select desired columns
+Run_summary <- merge(
+  PG_summary,
+  PSM_summary
+) %>%
+  # Add in Run_annotations data to get NL values
+  merge(Run_annotations) %>%
+  dplyr::select(
+    Run,
+    PSMs,
+    `Protein groups`,
+    Enzyme,
+    Desalting,
+    Sample
+  )
+
+# Make data summary
+missed_cleavages_summary <- PeptideGroups %>%
+  filter(!Run == "lysc_spin_column_third_prep_200ng (1)") %>%
+  group_by(Run, Enzyme) %>%
+  count(`# Missed Cleavages` = `# Missed Cleavages`) %>%
+  mutate(Percent = prop.table(n))
+```
+
+# Lysis comparison
+```{r}
+# Make a plot
+lysate_dat %>%
+  ggplot(aes(x = Method, y = Concentration, fill = Method)) +
+  stat_summary(fun.data = mean_sd, geom = "bar") +
+  stat_summary(fun.data = mean_sd, geom = "errorbar", width = 0.2) +
+  stat_compare_means(
+    method = "anova",
+    aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
+  labs(
+    title = "Lysis method concentrations",
+    x = "Lysis method",
+    y = "Protein concentration (\u03bcg/mL)"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Lysis methods concentrations.png"), width = plot_width, height = plot_height)
+```
+
+# Enzyme comparison
+```{r}
+# Print ID means
+Run_summary %>%
+  group_by(Enzyme) %>%
+  summarise(PSMs = mean(PSMs), "Protein groups" = mean(`Protein groups`))
+
+# Make plots of peptide and protein group IDs by enzyme - with stats
+Run_summary %>%
+  pivot_longer(cols = c(PSMs, `Protein groups`), values_to = "IDs", names_to = "Measure") %>%
+  ggplot(aes(x = Enzyme, y = IDs, fill = Enzyme)) +
+  stat_summary(fun.data = mean_sd, geom = "bar") +
+  stat_summary(fun.data = mean_sd, geom = "errorbar", width = 0.2) +
+  stat_compare_means(
+    method = "anova",
+    aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
+  facet_wrap("Measure", scales = "free_y") +
+  labs(
+    title = "Identification numbers by digestion method",
+    x = "Digestion method",
+    y = "Identification numbers"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Digestion method IDs.png"), width = plot_width, height = plot_height)
+
+# Missed cleavages
+# Print results
+missed_cleavages_summary %>%
+  filter(`# Missed Cleavages` == 0) %>%
+  group_by(Enzyme) %>%
+  summarise("proportion peptides fully tryptic" = mean(Percent))
+
+# Make a plot
+missed_cleavages_summary %>%
+  ggplot(aes(x = Enzyme, y = Percent, fill = Enzyme)) +
+  stat_summary(fun.data = mean_sd, geom = "bar") +
+  stat_summary(fun.data = mean_sd, geom = "errorbar", width = 0.2) +
+  stat_compare_means(
+    method = "anova",
+    aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
+  facet_wrap("`# Missed Cleavages`") +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  scale_x_discrete(
+    position = "bottom",
+    sec.axis = dup_axis(name = "Number of missed cleavages", labels = NULL)
+  ) +
+  labs(
+    title = "Missed cleavages by digestion method",
+    x = "Digestion method",
+    y = "Proportion"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Digestion method missed cleavages.png"), width = plot_width, height = plot_height)
+```
+
+# Desalting comparison
+```{r}
+# Print ID means
+Run_summary %>%
+  group_by(Desalting) %>%
+  summarise(PSMs = mean(PSMs), "Protein groups" = mean(`Protein groups`))
+
+# Make plots of peptide and protein group IDs by enzyme - with stats
+Run_summary %>%
+  pivot_longer(cols = c(PSMs, `Protein groups`), values_to = "IDs", names_to = "Measure") %>%
+  ggplot(aes(x = Desalting, y = IDs, fill = Desalting)) +
+  stat_summary(fun.data = mean_sd, geom = "bar") +
+  stat_summary(fun.data = mean_sd, geom = "errorbar", width = 0.2) +
+  stat_compare_means(
+    method = "anova",
+    aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
+  facet_wrap("Measure", scales = "free_y") +
+  labs(
+    title = "Identification numbers by desalting method",
+    x = "Desalting method",
+    y = "Identification numbers"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Desalting method IDs.png"), width = plot_width, height = plot_height)
+```
+
+# Summary table
+```{r}
+merge(
+  Run_summary,
+  filter(missed_cleavages_summary, `# Missed Cleavages` == 0),
+  by = c("Run", "Enzyme")
+) %>%
+  mutate(Run = Sample, "Fully_tryptic" = paste0(round(Percent, digits = 3) * 100, "%")) %>%
+  select(Run, Enzyme, Desalting, PSMs, `Protein groups`, Fully_tryptic) %>%
+  write.csv(paste0(output_dir, "optimisation_summary.csv"))
+```

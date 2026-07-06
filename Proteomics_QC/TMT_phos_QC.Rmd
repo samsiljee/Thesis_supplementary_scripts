@@ -1,0 +1,501 @@
+---
+title: "MS phosphoproteomics QC (Proteome Discoverer)"
+author: "Sam Siljee"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr) # Data wrangling
+library(tidyr) # For `pivot_longer` in labelling efficiency graph
+library(stringr) # For annotating labeling efficiency and channel abundances
+library(ggplot2) # Plotting
+library(vroom) # Fast reading of data
+library(ggVennDiagram) # New package to make venn diagrams
+library(rawrr) # For loading raw data for chromatograms
+library(Peptides) # for calculating GRAVY scores
+
+# Set some variables
+load_from_rda <- TRUE
+run_chromatograms <- FALSE
+plot_width <- 8
+plot_height <- 5.5
+input_dir <- paste0(getwd(), "/data/Phos/")
+output_dir <- paste0(getwd(), "/../produced_plots/MS_QC/Phos/")
+channels_vector <- c(
+  "126",
+  paste0(rep(127:134, each = 2), c("N", "C")),
+  "135N"
+)
+```
+
+## Load the data
+```{r load data, include = FALSE}
+# Load custom functions
+source(paste0(input_dir, "../../../Functions.R"))
+
+# Load the data
+if(load_from_rda) {
+  # load files from .rda files for faster loading
+  rda_files <- c(
+    "Run_annotations.rda",
+    "MSMSSpectrumInfo.rda",
+    "ProteinGroups.rda",
+    "PSMs.rda",
+    "QuanSpectra.rda",
+    "PeptideGroups.rda",
+    "Proteins.rda",
+    "ModificationSites.rda"
+  )
+  for (i in rda_files) {
+    load(paste0(input_dir, i))
+  }
+  
+  # Load chromatogram data if required
+  if(run_chromatograms) {
+    load(paste0(input_dir, "chrom_data.rda"))
+  }
+} else {
+  # Load PD LFQ output from txt files
+  files_list <- list.files(input_dir, full.names = TRUE)
+  
+  # Load run summary to use as annotations file, add "Path" column to merge with other datasets
+  Run_annotations <- read.delim(paste0(input_dir, "run_annotations.tsv"), header = TRUE) %>%
+    # Convert some columns to factors for faster computation
+    mutate(
+      across(
+        c(
+          Batch,
+          Run
+        ),
+        as.factor
+      )
+    )
+  save(Run_annotations, file = paste0(input_dir, "Run_annotations.rda"))
+  
+  # Load different types of data
+  MSMSSpectrumInfo <- import_txt_data("MSMSSpectrumInfo", input_dir, files_list, Run_annotations)
+  save(MSMSSpectrumInfo, file = paste0(input_dir, "MSMSSpectrumInfo.rda"))
+  
+  ProteinGroups <- import_txt_data("ProteinGroups", input_dir, files_list, Run_annotations)
+  save(ProteinGroups, file = paste0(input_dir, "ProteinGroups.rda"))
+  
+  PSMs <- import_txt_data("PSMs", input_dir, files_list, Run_annotations)
+  save(PSMs, file = paste0(input_dir, "PSMs.rda"))
+  
+  QuanSpectra <- import_txt_data("QuanSpectra", input_dir, files_list, Run_annotations)
+  save(QuanSpectra, file = paste0(input_dir, "QuanSpectra.rda"))
+  
+  PeptideGroups <- import_txt_data("PeptideGroups", input_dir, files_list, Run_annotations)
+  save(PeptideGroups, file = paste0(input_dir, "PeptideGroups.rda"))
+  
+  Proteins <- import_txt_data("Proteins", input_dir, files_list, Run_annotations)
+  save(Proteins, file = paste0(input_dir, "Proteins.rda"))
+  
+  ModificationSites <- import_txt_data("ModificationSites", input_dir, files_list, Run_annotations)
+  save(ModificationSites, file = paste0(input_dir, "ModificationSites.rda"))
+  
+  # Load data if running chromatograms
+  if (run_chromatograms) {
+    # Load chromatogram data
+    raw_files <- list.files(input_dir, full.names = TRUE) %>%
+      grep(pattern = ".raw$", value = TRUE)
+    
+    # Initialise data.frame
+    chrom_data <- data.frame()
+    
+    # Read in raw files and extract TIC values to data.frame
+    for (i in raw_files) {
+      # Open file
+      tic <- rawrr::readChromatogram(rawfile = i, type = "tic")
+      bpc <- rawrr::readChromatogram(rawfile = i, type = "bpc")
+      
+      chrom_data <- rbind(
+        chrom_data,
+        data.frame(
+          TIC = tic$intensities,
+          BP = bpc$intensities,
+          RT = as.numeric(tic$times),
+          raw_path = i
+        )
+      )
+    }
+    
+    # Merge with run overview data for annotations
+    chrom_data <- merge(
+      chrom_data,
+      mutate(
+        Run_annotations,
+        # Add column to match up to protein groups files
+        raw_path = paste0(input_dir, "/", Run, ".raw")
+      ),
+      by = "raw_path",
+      all.x = TRUE
+    )
+    
+    # Save as R data for faster laoding in future
+    save(chrom_data, file = paste0(input_dir, "chrom_data.rda"))
+  }
+}
+
+# Add a column to describe fully or partially tagged peptides
+PSMs <- PSMs %>%
+  mutate(
+    # Create a trimmed sequence to count lysines - ignoring lysines before and after
+    `Trimmed sequence` = gsub("^\\[.*?\\].|.\\[.*?\\]$", "", `Annotated Sequence`),
+    `Lysine count` = str_count(tolower(`Trimmed sequence`), "k"),
+    `Lysine tag count` = str_count(Modifications, "K\\d{1,2}\\(TMTpro\\)"),
+    `N-Term tagged` = grepl("N-Term(TMTpro)", Modifications, fixed = TRUE),
+    `Lysine tagged` = ifelse(
+      `Lysine count` != 0, # Only count sequences containing lysine
+      ifelse(
+        `Lysine tag count` == `Lysine count`,
+        TRUE, # All lysines are tagged
+        FALSE # Not all lysines are tagged
+      ),
+      NA
+    ), # Return NA if no lysine in the sequence
+    `Completely tagged` = `N-Term tagged` & (`Lysine tagged` | is.na(`Lysine tagged`)),
+    "GRAVY score" = hydrophobicity(`Trimmed sequence`) # Calculate hydrophobicity
+  )
+
+# Parse phosphosite data
+PSMs <- PSMs %>%
+  rowwise() %>%
+  mutate(parsed = list(parse_phos_confidence(`ptmRS: Best Site Probabilities`))) %>%
+  unnest_wider(parsed)
+```
+
+## Chromatograms
+```{r Create chromatograms}
+if(run_chromatograms) {
+  # Make the plot TIC chromatograms
+  chrom_data %>%
+    ggplot(aes(x = RT, y = TIC, col = Run)) +
+    geom_line() +
+    facet_wrap("Run", ncol = 1) +
+    labs(
+      title = "Total ion current chromatograms for phosphoproteomics runs",
+      x = "Retention time"
+    ) +
+    theme_bw() +
+    theme(legend.position = "none")
+  
+  # Save the plot standard size
+  ggsave(paste0(output_dir, "TIC phos chromatograms.png"), width = plot_width, height = plot_height)
+  
+  # Make the plot BP chromatograms
+  chrom_data %>%
+    ggplot(aes(x = RT, y = BP, col = Run)) +
+    geom_line() +
+    facet_wrap("Run", ncol = 1) +
+    labs(
+      title = "Base peak chromatograms for phosphoproteomics runs",
+      x = "Retention time"
+    ) +
+    theme_bw() +
+    theme(legend.position = "none")
+  
+  # Save the plot standard size
+  ggsave(paste0(output_dir, "BP phos chromatograms.png"), width = plot_width, height = plot_height)
+}
+```
+
+## PSMs By RT
+Plot of peptide-spectrum matches by retention time. Coloured by run or condition
+```{r PSMs by retention time plot, echo = FALSE}
+# Make the plot by sample with facet grid by batch/sample
+PSMs %>%
+  ggplot(aes(x = `RT [min]`, color = Run)) +
+  geom_density() +
+  facet_wrap("Run", ncol = 1) +
+  labs(
+    title = "PSMs by retention time for phosphoproteomics runs",
+    x = "Retention time",
+    y = "PSM identifications"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+    )
+
+# Save the plot standard size
+ggsave(paste0(output_dir, "Phos PSMs by RT.png"), width = plot_width, height = plot_height)
+```
+
+## ID numbers
+```{r}
+# Summarise counts from PSM data
+PSMs %>%
+  dplyr::select(c(Run, `Master Protein Accessions`)) %>%
+  unique() %>%
+  group_by(Run) %>%
+  summarise(Protein_count = n())
+
+# Count distinct phosphosites
+ModificationSites %>%
+  dplyr::select(`Protein Accession`, Position) %>%
+  distinct() %>%
+  nrow()
+
+# Count number of phosphosites per run
+ModificationSites %>%
+  dplyr::select(Run, `Protein Accession`, Position) %>%
+  group_by(Run) %>%
+  summarise("Phosphosites" = n())
+```
+
+## Modification numbers by protein
+```{r}
+# Summarise the data
+Phosphosite_summary <- ModificationSites %>%
+  group_by(Run, `Protein Accession`) %>%
+  summarise(Phosphosites = n(), .groups = 'drop') %>% # Count number of phosphosite per protein
+  group_by(Run, Phosphosites) %>%
+  summarise(Count = n(), .groups = 'drop') %>% # Count phosphosites per protein
+  group_by(Run) %>%
+  mutate(Proportion = Count / sum(Count)) %>%
+  mutate(Phosphosites = as.factor(
+    ifelse(
+      as.numeric(Phosphosites) >= 20,
+      "20+",
+      as.character(Phosphosites)))) %>%
+  group_by(Phosphosites) %>%
+  summarise(
+    SD = sd(Proportion, na.rm = TRUE),
+    Proportion = mean(Proportion),
+    .groups = 'drop'
+  )
+
+# Display proportion of singly phosphorylated proteins
+Phosphosite_summary %>%
+  filter(Phosphosites == 1) %>%
+  .$Proportion
+
+# Make the plot
+Phosphosite_summary %>%
+  ggplot(aes(
+    x = factor(Phosphosites, levels = c(as.character(1:19), "20+")),
+    y = Proportion,
+    ymin = Proportion - SD,
+    ymax = Proportion + SD,
+    fill = factor(Phosphosites, levels = c(as.character(1:19), "20+")))) +
+  geom_col() +
+  geom_errorbar(width = 0.2) +
+  scale_y_continuous(
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(
+    x = "Phosphosite counts by protein",
+    y = "Proportion of identified proteins",
+    title = "Protein phosphosite count"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Phosphosite counts.png"), width = plot_width, height = plot_height)
+```
+
+## Confidence scores
+```{r}
+# Present proportion of PSMs meeting confidence scores
+mean(PSMs$probability > 75, na.rm = TRUE)
+
+# Make the plot by sample with facet grid by batch/sample
+PSMs %>%
+  ggplot(aes(x = probability)) +
+  geom_density(bw = 0.1) +
+  scale_x_continuous(
+    labels = function(x) paste0(x, "%")
+  ) +
+  labs(
+    title = "Phosphosite confidence scores",
+    x = "Site localisation confidence score (IMP-ptmRS)",
+    y = "Density"
+  ) +
+  theme_bw()
+
+# Save the plot standard size
+ggsave(paste0(output_dir, "Phosphosite confidence scores.png"), width = plot_width, height = plot_height)
+```
+
+## Phosphorylation rate
+Using data from dynamic phosphrylation rate.
+```{r}
+mean(grepl("Phospho", PSMs$Modifications))
+```
+
+# LEGACY CODE
+Code no longer needed currently, from previous analyses
+
+## Summarise details of the runs
+```{r Run summary table}
+# Count number of proteins per run
+PG_summary <- ProteinGroups %>%
+  group_by(Run) %>%
+  summarise("Protein groups" = length(unique(`Protein Groups Protein Group ID`)))
+
+# Count number of PSMs per run
+PSM_summary <- PSMs %>%
+  group_by(Run) %>%
+  summarise("PSMs" = n())
+
+# Count number of spectra per run
+MSMSSpectrumInfo_summary <- MSMSSpectrumInfo %>%
+  group_by(Run) %>%
+  summarise("Spectra" = n())
+
+# Count number of proteins per run
+Proteins_summary <- Proteins %>%
+  group_by(Run) %>%
+  summarise("Proteins" = n())
+
+# Count number of phosphosites per run
+Phosphosites_summary <- ModificationSites %>%
+  group_by(Run) %>%
+  summarise("Phosphosites" = n())
+
+# Combine with Run_annotations and select desired columns
+Run_summary <- merge(
+  PG_summary,
+  PSM_summary
+) %>%
+  merge(MSMSSpectrumInfo_summary) %>%
+  merge(Proteins_summary) %>%
+  merge(Phosphosites_summary) %>%
+  merge(Run_annotations) %>%
+  mutate("Identification rate" = PSMs / Spectra) %>%
+  dplyr::select(Run, Batch, Spectra, PSMs, `Identification rate`, `Protein groups`, Proteins, Phosphosites)
+
+# Save as .csv file
+write.csv(Run_summary, paste0(output_dir, "Run_summary.csv"))
+
+# Summarise some results
+range(Run_summary$Proteins)
+mean(Run_summary$Proteins)
+```
+
+## Venn diagrams
+Overview of protein overlaps between replicates of the same sample
+```{r venn diagrams}
+# List off unique proteins (by group description) for each fraction
+# venn_list_1 <- ProteinGroups %>%
+#   filter(Batch == 1) %>%
+#   split(.$Fraction) %>%
+#   lapply(function(df) {
+#     df %>%
+#       dplyr::select(`Group Description`) %>%
+#       pull()
+#   })
+# 
+# # make the plot for several combinations of fractions
+# ggVennDiagram(venn_list_1[1:4]) +
+#   theme_void() +
+#   ggtitle("Fraction identification overlap - fractions 1 to 4") +
+#   ggplot2::scale_fill_gradient(low="white",high = "red")
+# 
+# # Save the plot
+# ggsave(paste0(output_dir, "Batch 1 fraction replication venn diagram 1 to 4.png"), width = plot_width, height = plot_height)
+# 
+# # make the plot for several combinations of fractions
+# ggVennDiagram(venn_list_1[3:6]) +
+#   theme_void() +
+#   ggtitle("Fraction identification overlap - fractions 3 to 6") +
+#   ggplot2::scale_fill_gradient(low="white",high = "red")
+# 
+# # Save the plot
+# ggsave(paste0(output_dir, "Batch 1 fraction replication venn diagram 3 to 6.png"), width = plot_width, height = plot_height)
+# 
+# # make the plot for several combinations of fractions
+# ggVennDiagram(venn_list_1[5:8]) +
+#   theme_void() +
+#   ggtitle("Fraction identification overlap - fractions 5 to 8") +
+#   ggplot2::scale_fill_gradient(low="white",high = "red")
+# 
+# # Save the plot
+# ggsave(paste0(output_dir, "Batch 1 fraction replication venn diagram 5 to 8.png"), width = plot_width, height = plot_height)
+# 
+# # Venn diagrams for fraction overlap by batch
+# for (i in unique(Run_annotations$Fraction)) {
+#   venn_list <- ProteinGroups %>%
+#     filter(Fraction == i) %>%
+#     split(.$Batch) %>%
+#     lapply(function(df) {
+#       df %>%
+#         dplyr::select(`Group Description`) %>%
+#         pull()
+#     })
+# 
+#   # make the plot for several combinations of fractions
+#   ggVennDiagram(venn_list) +
+#     theme_void() +
+#     ggtitle(paste("Batch identification overlap - fraction", i)) +
+#     ggplot2::scale_fill_gradient(low="white",high = "red")
+# 
+#   # Save the plot
+#   ggsave(paste0(output_dir, "Fraction ", i, " batch replication venn diagram.png"), width = plot_width, height = plot_height)
+# }
+# 
+# # Top 3 runs Venn diagrams
+# 
+# # Venn diagrams for fraction overlap by top 3 batches - for fractions 1 - 6
+# for (i in 1:6) {
+#   venn_list <- list(
+#     "1" = filter(ProteinGroups, Fraction == i, Batch == 1)$`Group Description`,
+#     "3" = filter(ProteinGroups, Fraction == i, Batch == 3)$`Group Description`,
+#     "4" = filter(ProteinGroups, Fraction == i, Batch == 4)$`Group Description`
+#   )
+# 
+#   # make the plot for several combinations of fractions
+#   ggVennDiagram(venn_list) +
+#     theme_void() +
+#     ggtitle(paste("Batch identification overlap - fraction", i)) +
+#     ggplot2::scale_fill_gradient(low="white",high = "red")
+# 
+#   # Save the plot
+#   ggsave(paste0(output_dir, "Fraction ", i, " batch replication venn diagram top 3 runs.png"), width = plot_width, height = plot_height)
+# }
+# 
+# # Venn diagrams for fraction overlap by top 3 batches - for fraction 7
+# venn_list <- list(
+#   "1" = filter(ProteinGroups, Fraction == 7, Batch == 1)$`Group Description`,
+#   "2" = filter(ProteinGroups, Fraction == 7, Batch == 2)$`Group Description`,
+#   "4" = filter(ProteinGroups, Fraction == 7, Batch == 4)$`Group Description`
+# )
+# 
+# # make the plot for several combinations of fractions
+# ggVennDiagram(venn_list) +
+#   theme_void() +
+#   ggtitle("Batch identification overlap - fraction 7") +
+#   ggplot2::scale_fill_gradient(low="white",high = "red")
+# 
+# # Save the plot
+# ggsave(paste0(output_dir, "Fraction 7 batch replication venn diagram top 3 runs.png"), width = plot_width, height = plot_height)
+# 
+# # Venn diagrams for fraction overlap by top 3 batches - for fraction 8
+# venn_list <- list(
+#   "2" = filter(ProteinGroups, Fraction == 8, Batch == 2)$`Group Description`,
+#   "3" = filter(ProteinGroups, Fraction == 8, Batch == 3)$`Group Description`,
+#   "4" = filter(ProteinGroups, Fraction == 8, Batch == 4)$`Group Description`
+# )
+# 
+# # make the plot for several combinations of fractions
+# ggVennDiagram(venn_list) +
+#   theme_void() +
+#   ggtitle("Batch identification overlap - fraction 8") +
+#   ggplot2::scale_fill_gradient(low="white",high = "red")
+# 
+# # Save the plot
+# ggsave(paste0(output_dir, "Fraction 8 batch replication venn diagram top 3 runs.png"), width = plot_width, height = plot_height)
+```

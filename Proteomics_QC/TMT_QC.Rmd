@@ -1,0 +1,1315 @@
+---
+title: "MS TMT QC (Proteome Discoverer)"
+author: "Sam Siljee"
+output:
+  pdf_document: default
+  html_document: default
+---
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages
+library(dplyr) # Data wrangling
+library(tidyr) # For `pivot_longer` in labelling efficiency graph, and replace_na for Modifications
+library(stringr) # For annotating labelling efficiency and channel abundances
+library(ggplot2) # Plotting
+library(ggridges) # For ridgeline plots
+library(vroom) # Fast reading of data
+library(ggVennDiagram) # New package to make venn diagrams
+library(rawrr) # For loading raw data for chromatograms
+library(Peptides) # for calculating GRAVY scores
+library(ComplexUpset) # Used to make Upset plots
+# library(gganimate) # For animated chromatograms
+library(MSstatsTMT) # For profile plots
+library(rstatix) # to run ANOVA test
+library(ggpubr) # Add stats to plots
+
+# Set some variables
+load_from_rda <- TRUE
+run_chromatograms <- FALSE
+plot_width <- 8
+plot_height <- 5.5
+input_dir <- paste0(getwd(), "/data/TMT/")
+efficiency_dir <- paste0(getwd(), "/data/TMT_labelling_efficiency/")
+overlabelling_dir <- paste0(getwd(), "/data/TMT_overlabelling/")
+mixing_dir <- paste0(getwd(), "/data/TMT_mixing_ratio/")
+output_dir <- paste0(getwd(), "/../produced_plots/MS_QC/TMT/")
+run_annotations_file <- "run_annotations.tsv"
+channel_annotations_file <- "channel_annotations.tsv"
+final_proteins_file <- "LFQ_TMT_common_differential_proteins.txt"
+Gene_symbol_map <- "gene_symbol_map_manually_added.tsv"
+channels_vector <- c(
+  "126",
+  paste0(rep(127:134, each = 2), c("N", "C")),
+  "135N"
+)
+```
+
+## Load the data
+```{r load data, include = FALSE}
+# Load custom functions
+source(paste0(input_dir, "../../../Functions.R"))
+
+# Load the data
+if (load_from_rda) {
+  # load files from .rda files for faster loading
+  rda_files <- c(
+    "Run_annotations.rda",
+    "Channel_annotations.rda",
+    "MSMSSpectrumInfo.rda",
+    "ProteinGroups.rda",
+    "PSMs.rda",
+    "QuanSpectra.rda",
+    "PeptideGroups.rda",
+    "Proteins.rda",
+    "TMT_processed.rda",
+    "TMT_processed_no_normalisation.rda",
+    "Efficiency_PSMs.rda",
+    "Overlabelling_PSMs.rda",
+    "Mixing_PSMs.rda"
+  )
+  for (i in rda_files) {
+    load(paste0(input_dir, i))
+  }
+  
+  # Load chromatogram data if required
+  if(run_chromatograms) {
+    load(paste0(input_dir, "chrom_data.rda"))
+  }
+  
+} else {
+  # Load files from .txt data to refresh data
+  files_list <- list.files(input_dir, full.names = TRUE)
+
+  # Load run summary to use as annontations file, add "Path" column to merge with other datasets
+  Run_annotations <- read.delim(paste0(input_dir, run_annotations_file), header = TRUE) %>%
+    # Convert some columns to factors for faster computation
+    mutate(
+      across(
+        c(
+          Batch,
+          Run,
+          Fraction
+        ),
+        as.factor
+      )
+    )
+  # Save for faster loading in future
+  save(Run_annotations, file = paste0(input_dir, "Run_annotations.rda"))
+  
+  # Load channel annotations
+  Channel_annotations <- read.delim(paste0(input_dir, channel_annotations_file), header = TRUE) %>%
+    # Convert some columns to factors for faster computation
+    mutate(
+      across(
+        c(
+          Mixture,
+          Channel,
+          Condition,
+          Donor
+        ),
+        as.factor
+      )
+    )
+  # Save for faster loading in future
+  save(Channel_annotations, file = paste0(input_dir, "Channel_annotations.rda"))
+
+  # Load different types of data - and save as R data files for faster loading in future
+  MSMSSpectrumInfo <- import_txt_data("MSMSSpectrumInfo", input_dir, files_list, Run_annotations)
+  save(MSMSSpectrumInfo, file = paste0(input_dir, "MSMSSpectrumInfo.rda"))
+
+  ProteinGroups <- import_txt_data("ProteinGroups", input_dir, files_list, Run_annotations)
+  save(ProteinGroups, file = paste0(input_dir, "ProteinGroups.rda"))
+
+  PSMs <- import_txt_data("PSMs", input_dir, files_list, Run_annotations)
+  save(PSMs, file = paste0(input_dir, "PSMs.rda"))
+
+  QuanSpectra <- import_txt_data("QuanSpectra", input_dir, files_list, Run_annotations)
+  save(QuanSpectra, file = paste0(input_dir, "QuanSpectra.rda"))
+
+  PeptideGroups <- import_txt_data("PeptideGroups", input_dir, files_list, Run_annotations)
+  save(PeptideGroups, file = paste0(input_dir, "PeptideGroups.rda"))
+
+  Proteins <- import_txt_data("Proteins", input_dir, files_list, Run_annotations)
+  save(Proteins, file = paste0(input_dir, "Proteins.rda"))
+  
+  Efficiency_PSMs <- import_txt_data("PSMs", efficiency_dir, list.files(efficiency_dir, full.names = TRUE), Run_annotations)
+  save(Efficiency_PSMs, file = paste0(input_dir, "Efficiency_PSMs.rda"))
+  
+  Overlabelling_PSMs <- import_txt_data("PSMs", overlabelling_dir, list.files(overlabelling_dir, full.names = TRUE), Run_annotations)
+  save(Overlabelling_PSMs, file = paste0(input_dir, "Overlabelling_PSMs.rda"))
+  
+  Mixing_PSMs <- import_txt_data("PSMs", mixing_dir, list.files(mixing_dir, full.names = TRUE), Run_annotations)
+  save(Mixing_PSMs, file = paste0(input_dir, "Mixing_PSMs.rda"))
+  
+  # Load data if running chromatograms
+  if (run_chromatograms) {
+    # Load chromatogram data
+    raw_files <- list.files(input_dir, full.names = TRUE) %>%
+      grep(pattern = ".raw$", value = TRUE)
+    
+    # Initialise data.frame
+    chrom_data <- data.frame()
+    
+    # Read in raw files and extract TIC values to data.frame
+    for (i in raw_files) {
+      # Open file
+      tic <- rawrr::readChromatogram(rawfile = i, type = "tic")
+      bpc <- rawrr::readChromatogram(rawfile = i, type = "bpc")
+      
+      chrom_data <- rbind(
+        chrom_data,
+        data.frame(
+          TIC = tic$intensities,
+          BP = bpc$intensities,
+          RT = as.numeric(tic$times),
+          raw_path = i
+        )
+      )
+    }
+    
+    # Merge with run overview data for annotations
+    chrom_data <- merge(
+      chrom_data,
+      mutate(
+        Run_annotations,
+        # Add column to match up to protein groups files
+        raw_path = paste0(input_dir, "/", Run, ".raw")
+      ),
+      by = "raw_path",
+      all.x = TRUE
+    )
+    
+    # Save as R data for faster laoding in future
+    save(chrom_data, file = paste0(input_dir, "chrom_data.rda"))
+  }
+}
+
+# Read in list of final proteins of interest
+final_proteins <- readLines(paste0(input_dir, final_proteins_file))
+
+# Load the gene symbols map
+gene_symbols_map <- read.delim(paste0(input_dir, Gene_symbol_map), header = TRUE, sep = "\t")
+
+# Calculate GRAVY score for fractionation testing
+PSMs <- PSMs %>%
+  mutate(
+    # Create a trimmed sequence to count lysines - ignoring lysines before and after
+    `Trimmed sequence` = gsub("^\\[.*?\\].|.\\[.*?\\]$", "", `Annotated Sequence`),
+    "GRAVY score" = hydrophobicity(`Trimmed sequence`, scale = "KyteDoolittle")
+  )
+
+# Add in columns for over labelling and labelling efficiency
+Efficiency_PSMs <- Efficiency_PSMs %>%
+  mutate(
+    # Replace NAs in the modifications column for peptides with no modifications
+    Modifications = replace_na(Modifications, "None"),
+    # Create a trimmed sequence to count lysines - ignoring lysines before and after
+    `Trimmed sequence` = gsub("^\\[.*?\\].|.\\[.*?\\]$", "", `Annotated Sequence`),
+    # Count some residues for relative modification rates
+    `Lysine count` = str_count(tolower(`Trimmed sequence`), "k"),
+    # Count numbers of tags on specific residues
+    `Lysine tag count` = str_count(Modifications, "K\\d{1,2}\\(TMTpro"),
+    # Add some columns for fully tagged or partially tagged
+    `N-Term tagged` = grepl("N-Term(TMTpro)", Modifications, fixed = TRUE),
+    `Lysine tagged` = ifelse(
+      `Lysine count` != 0, # Only count sequences containing lysine
+      ifelse(
+        `Lysine tag count` == `Lysine count`,
+        TRUE, # All lysines are tagged
+        FALSE # Not all lysines are tagged
+      ),
+      NA
+    ), # Return NA if no lysine in the sequence
+    `Completely tagged` = `N-Term tagged` & (`Lysine tagged` | is.na(`Lysine tagged`))
+  )
+
+# Add in columns for over labelling and labelling efficiency
+Overlabelling_PSMs <- Overlabelling_PSMs %>%
+  mutate(
+    # Replace NAs in the modifications column for peptides with no modifications
+    Modifications = replace_na(Modifications, "None"),
+    # Create a trimmed sequence to count lysines - ignoring lysines before and after
+    `Trimmed sequence` = gsub("^\\[.*?\\].|.\\[.*?\\]$", "", `Annotated Sequence`),
+    # Count some residues for relative modification rates
+    `Histidine count` = str_count(tolower(`Trimmed sequence`), "h"),
+    `Serine count` = str_count(tolower(`Trimmed sequence`), "s"),
+    `Threonine count` = str_count(tolower(`Trimmed sequence`), "t"),
+    `Tyrosine count` = str_count(tolower(`Trimmed sequence`), "y"),
+    # Count numbers of tags on specific residues
+    `Histidine tag count` = str_count(Modifications, "H\\d{1,2}\\(TMTpro"),
+    `Serine tag count` = str_count(Modifications, "S\\d{1,2}\\(TMTpro"),
+    `Threonine tag count` = str_count(Modifications, "T\\d{1,2}\\(TMTpro"),
+    `Tyrosine tag count` = str_count(Modifications, "Y\\d{1,2}\\(TMTpro")
+  )
+
+# Add in details to mixing ratio PSMs
+Mixing_PSMs <- Mixing_PSMs %>%
+  mutate(Mix = ifelse(`Spectrum File` == "TMT_mixing_ratio_new_mix.raw", "Corrected", "Uncorrected"))
+```
+
+## Labelling efficiency
+```{r labelling efficiency, echo = FALSE}
+# Check overall complete tagging rate
+print(paste0("Overall completely tagged: ", round(
+  mean(Efficiency_PSMs$`Completely tagged`)
+  * 100, 2), "%"))
+# Check partially tagged peptides
+print(paste0("Overall at least one tag: ", round(
+mean(Efficiency_PSMs$`N-Term tagged` | Efficiency_PSMs$`Lysine tagged`, na.rm = TRUE)
+  * 100, 2), "%"))
+# Check N-terminus tagging rate
+print(paste0("Overall N-terminus tagged: ", round(
+mean(Efficiency_PSMs$`N-Term tagged`)
+  * 100, 2), "%"))
+# Check Lysine tagging rate
+print(paste0("Overall N-lysine tagged: ", round(
+mean(Efficiency_PSMs$`Lysine tagged`, na.rm = TRUE)
+  * 100, 2), "%"))
+# Tagging percentage by fraction
+Efficiency_PSMs %>%
+  group_by(Fraction) %>%
+  summarise("Percent fully tagged" = round(mean(`Completely tagged`) * 100, 4))
+# Fraction 1 fully tagged
+print(paste0("Fraction 1 completely tagged: ", round(
+  mean(filter(Efficiency_PSMs, Fraction == 1)$`Completely tagged`)
+  * 100, 2), "%"))
+# Fraction 7 fully tagged
+print(paste0("Fraction 7 completely tagged: ", round(
+  mean(filter(Efficiency_PSMs, Fraction == 7)$`Completely tagged`)
+  * 100, 2), "%"))
+
+# Use reporter ion abundance missing values as a proxy for over or under tagging by sample
+labelling_summary <- Efficiency_PSMs %>%
+  pivot_longer(
+    cols = starts_with("Abundance: "),
+    values_to = "Abundance",
+    names_to = "Channel",
+    names_prefix = "Abundance: "
+  ) %>%
+  filter(`Completely tagged` == TRUE) %>%
+  group_by(Channel, Run) %>%
+  summarise(prop_na = mean(is.na(Abundance))) %>%
+  merge(Channel_annotations, by = "Channel") %>%
+  arrange(Donor)
+
+# Perform paired t-tests and print results
+test_summary <- labelling_summary %>%
+  filter(Condition != "Norm") %>%
+  group_by(Condition, Donor) %>%
+  summarise(prop_na = mean(prop_na))
+labelling_test <- t.test(
+  filter(test_summary, Condition == "pLL3.7")$prop_na,
+  filter(test_summary, Condition == "pLVUHshp53")$prop_na,
+  paired = TRUE
+)
+interpret_t_test(labelling_test, test_summary, "prop_na", conditions = c("pLVUHshp53", "pLL3.7"))
+
+# Calculate mean missing values by condition
+mean(filter(test_summary, Condition == "pLVUHshp53")$prop_na)
+mean(filter(test_summary, Condition == "pLL3.7")$prop_na)
+
+# Run ANOVA for proportion fully tagged by sample
+labelling_anova <- labelling_summary %>%
+  mutate(Sample = paste(Donor, Condition)) %>%
+  anova_test(prop_na ~ Sample)
+
+# Print results
+labelling_anova$p
+
+# Create plot
+Efficiency_PSMs %>%
+  pivot_longer(
+    cols = c("Completely tagged", "N-Term tagged", "Lysine tagged"),
+    names_to = "Measure",
+    values_to = "Tagged"
+  ) %>%
+  group_by(Fraction, Measure) %>%
+  summarise(
+    n = n(),
+    mean = mean(Tagged, na.rm = TRUE),
+    sd = sqrt(mean * (1 - mean) / n)
+  ) %>%
+  ggplot(aes(x = Fraction, y = mean, ymin = mean - sd, ymax = mean + sd, fill = Fraction)) +
+  geom_bar(position = position_dodge(width = 0.9), stat = "identity") +
+  geom_errorbar(width = 0.2, position = position_dodge(width = 0.9)) +
+  geom_hline(yintercept = 0.98, col = "blue", alpha = 0.5) +
+  facet_wrap("Measure") +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(
+    x = "Fraction",
+    y = "Percent tagged",
+    title = "TMT labelling efficiency") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# Save the plot
+ggsave(paste0(output_dir, "Labelling efficiency.png"), width = plot_width, height = plot_height)
+
+# Plot of reporter ion missing values by sample
+labelling_summary %>%
+  mutate(Sample = paste(Donor, Condition, sep = "_")) %>%
+  group_by(Sample, Run) %>%
+  summarise(
+    prop_na = mean(prop_na)
+  ) %>%
+  ggplot(aes(x = Sample, y = prop_na, fill = Sample)) +
+  stat_summary(fun.data = mean_sd, geom = "bar") +
+  stat_summary(fun.data = mean_sd, geom = "errorbar", width = 0.2) +
+  stat_compare_means(
+    method = "anova",
+    aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
+  scale_y_continuous(
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(
+    x = "Sample",
+    y = "Proportion of reporter ion missing values",
+    title = "Reporter ion missing values by sample") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0
+    )
+  ) +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "Reporter ion missing values by sample.png"), width = plot_width, height = plot_height)
+```
+
+## Over labelling
+Note that this uses data from a different search, where TMT-tagged HSTY was included as a dynamic modification
+```{r TMT over labelling}
+# Make data summary
+HSTY_summary <- Overlabelling_PSMs %>%
+  group_by(Fraction, `Spectrum File`) %>%
+  summarise(
+    "Histidine" = sum(`Histidine tag count`) / sum(`Histidine count`),
+    "Serine" = sum(`Serine tag count`) / sum(`Serine count`),
+    "Threonine" = sum(`Threonine tag count`) / sum(`Threonine count`),
+    "Tyrosine" = sum(`Tyrosine tag count`) / sum(`Tyrosine count`)
+  ) %>%
+  pivot_longer(
+    cols = c(
+      "Histidine", 
+      "Serine", 
+      "Threonine", 
+      "Tyrosine"),
+    names_to = "Modification",
+    values_to = "Rate"
+  )
+
+# Get a summary of rates
+HSTY_summary %>%
+  group_by(Modification) %>%
+  summarise(Percent = round(mean(Rate)*100, digits = 2))
+
+# Get overall overlabeled peptides - at least one inappropriate tag
+mean(
+  Overlabelling_PSMs$`Histidine tag count` > 0 |
+    Overlabelling_PSMs$`Serine tag count` > 0 |
+    Overlabelling_PSMs$`Threonine tag count` > 0 |
+    Overlabelling_PSMs$`Tyrosine tag count` > 0
+)
+
+# Make a plot
+HSTY_summary %>%
+  ggplot(aes(x = Fraction, y = Rate, fill = Fraction)) +
+  stat_summary(fun.data = mean_sd, geom = "bar") +
+  stat_summary(fun.data = mean_sd, geom = "errorbar", width = 0.2) +
+  facet_wrap("Modification") +
+  scale_y_continuous(
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(x = "Fraction", y = "Proportion tagged") +
+  ggtitle("TMTpro over labelling") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# Save the plot
+ggsave(paste0(output_dir, "Over labelling.png"), width = plot_width, height = plot_height)
+```
+
+## Mixing ratios
+```{r mixing ratio, include = FALSE}
+# Mixing ratio before and after summary
+Mixing_abundances <- Mixing_PSMs %>%
+  dplyr::select(c(Mix, paste("Abundance:", channels_vector))) %>%
+  pivot_longer(cols = !c(Mix), names_to = "Channel", values_to = "Abundance") %>%
+  group_by(Mix, Channel) %>%
+  summarise("Sum abundances" = sum(Abundance, na.rm = TRUE)) %>%
+  as.data.frame() %>%
+  mutate(Channel = str_remove(Channel, "Abundance: "))
+
+# Calculate coefficient of variation by mix
+Mixing_abundances %>%
+  group_by(Mix) %>%
+  summarise(CV = round(sd(`Sum abundances`)/mean(`Sum abundances`)*100, digits = 2))
+
+# Create the plot
+Mixing_abundances %>%
+  ggplot(aes(x = Channel, y = `Sum abundances`, fill = Channel)) +
+  geom_col() +
+  labs(
+    title = "Sum of PSM channel abundances",
+    x = "Channel",
+    y = "Sum reporter ion abundance"
+  ) +
+  facet_wrap("Mix") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)
+  )
+
+# Save the plot standard size
+ggsave(paste0(output_dir, "Mixing ratio reporter ion abundances.png"), width = plot_width, height = plot_height)
+
+# Pivot data to long format and prepare for plotting
+Channel_abundances <- PSMs %>%
+  dplyr::select(c(Fraction, Batch, paste("Abundance:", channels_vector))) %>%
+  pivot_longer(cols = !c(Fraction, Batch), names_to = "Channel", values_to = "Abundance") %>%
+  group_by(Fraction, Batch, Channel) %>%
+  summarise("Sum abundances" = sum(Abundance, na.rm = TRUE)) %>%
+  as.data.frame() %>%
+  mutate(Channel = str_remove(Channel, "Abundance: "))
+
+# Create the plot
+Channel_abundances %>%
+  ggplot(aes(x = Channel, y = `Sum abundances`, fill = Channel)) +
+  geom_col() +
+  labs(
+    title = "Sum of PSM channel abundances",
+    x = "Channel",
+    y = "Sum reporter ion abundance"
+  ) +
+  facet_grid(Fraction ~ Batch) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)
+  )
+
+# Save the plot standard size
+ggsave(paste0(output_dir, "PSM reporter ion abundances.png"), width = plot_width, height = plot_height)
+```
+
+## Fractionation
+Assess efficacy of fractionation using GRAVY score.
+```{r Hydrophobicity}
+# Run one-way ANOVA to check significance of fractionation
+fractionation_anova <- PSMs %>%
+  group_by(Fraction, Run) %>%
+  summarise(`GRAVY score` = mean(`GRAVY score`), .groups = "drop") %>%
+  anova_test(`GRAVY score` ~ Fraction)
+
+# Print results
+fractionation_anova$p
+
+# Density plot of GRAVY scores
+PSMs %>%
+  ggplot(aes(x = `GRAVY score`, colour = Fraction)) +
+  geom_density() +
+  annotate("text", x = -2.5, y = 0.7, label = paste0("ANOVA, p = ", formatC(fractionation_anova$p, format = "e", digits = 2))) +
+  labs(
+    x = "GRAVY index (Kyte-Doolittle scoring)",
+    y = NULL,
+    title = "Peptide hydrophobicity by fraction"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "PSM hydrophobicity.png"), width = plot_width, height = plot_height)
+
+# Run one-way ANOVA to check significance of fractionation
+fractionation_RT_anova <- PSMs %>%
+  group_by(Fraction, Run) %>%
+  summarise(`RT [min]` = mean(`RT [min]`), .groups = "drop") %>%
+  anova_test(`RT [min]` ~ Fraction)
+
+# Print results
+fractionation_RT_anova$p
+
+# Make the plot
+PSMs %>%
+  ggplot(aes(x = `RT [min]`, color = Fraction)) +
+  geom_density(bw = 2.5) +
+  annotate("text", x = 40, y = 0.014, label = paste0("ANOVA, p = ", formatC(fractionation_RT_anova$p, format = "e", digits = 2))) +
+  scale_y_continuous(
+    name = "Peptide-spectrum matches",
+    breaks = NULL
+  ) +
+  labs(x = "Retention time (minutes)") +
+  ggtitle("PSMs by retention time") +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "PSMs over RT by fraction.png"), width = plot_width, height = plot_height)
+```
+
+## UpSet plots by fraction
+Plots to check overlap of peptide identifications by fraction
+```{r}
+# prepare the data for UpSet plots. Rows represent peptide groups, columns represent runs. 1 and 0 are used to represent whether the protein was detected in that sample or not.
+
+# Pivot wider to create the matrix
+UpSet_matrix_peptides <- PeptideGroups %>%
+  distinct(`Annotated Sequence`, Run) %>%
+  mutate(present = 1) %>%
+  pivot_wider(
+    id_cols = `Annotated Sequence`,
+    names_from = Run,
+    values_from = present,
+    values_fill = 0
+  )
+
+# Set up blank matrix for accumulated farction data
+fraction_names <- paste("Fraction", unique(Run_annotations$Fraction))
+fraction_matrix <- matrix(NA, nrow = nrow(UpSet_matrix_peptides), ncol = length(fraction_names) + 1) %>%
+    as.data.frame()
+colnames(fraction_matrix) <- c("Annotated Sequence", fraction_names)
+
+# Fill in protein names
+fraction_matrix$`Annotated Sequence` <- UpSet_matrix_peptides$`Annotated Sequence`
+
+# Loop to summarise fractions
+for(i in fraction_names) {
+    # Get list of runs for the fraction
+    runs <- filter(Run_annotations, Fraction == str_remove(i, "Fraction "))$Run %>% as.character
+    # Check if identified in at least one run and add to data
+    fraction_matrix[,i] <- as.numeric(rowSums(UpSet_matrix_peptides[,runs]) > 0)
+}
+
+# Count overlap fractions
+Fractions_identified <- rowSums(fraction_matrix[,fraction_names])
+sum(Fractions_identified == 8) / length(Fractions_identified)
+sum(Fractions_identified == 1) / length(Fractions_identified)
+
+# make the plot
+upset(
+    fraction_matrix,
+    fraction_names,
+    name = "Fraction intersections",
+    width_ratio = 0.1,
+    height_ratio = 0.3,
+    n_intersections = 15,
+    # base_annotations = list(
+    #     "Peptide group identifications" = intersection_size(text_mapping = aes(label = !!upset_text_percentage()))
+    # ),
+    min_degree = 1
+) +
+  labs(
+    title = "Peptide group identification numbers by fraction"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Fraction overlap UpSet plot.png"), width = plot_width * 2, height = plot_height * 2)
+```
+
+## Chromatograms
+```{r Load mzML files and create chromatograms}
+if(run_chromatograms) {
+  # Make the plot TIC chromatograms
+  chrom_data %>%
+    ggplot(aes(x = RT, y = TIC, col = Fraction)) +
+    geom_line() +
+    scale_x_discrete(
+    position = "bottom",
+    sec.axis = dup_axis(name = "Batch", labels = NULL)
+  ) +
+    scale_y_discrete(
+    position = "left",
+    sec.axis = dup_axis(name = "Fraction", labels = NULL)
+  ) +
+    labs(
+      title = "Total ion current chromatograms for TMT runs",
+      x = "Retention time",
+      y = "Total ion current intensity"
+    ) +
+    facet_grid(Fraction ~ Batch, scales = "free_y") +
+    theme_bw() +
+    theme(legend.position = "none")
+  
+  # Save the plot standard size
+  ggsave(paste0(output_dir, "TIC TMT chromatograms.png"), width = plot_width, height = plot_height)
+  
+  # Make the plot BP chromatograms
+  chrom_data %>%
+    ggplot(aes(x = RT, y = BP, col = Fraction)) +
+    geom_line() +
+    scale_x_discrete(
+    position = "bottom",
+    sec.axis = dup_axis(name = "Batch", labels = NULL)
+  ) +
+    scale_y_discrete(
+    position = "left",
+    sec.axis = dup_axis(name = "Fraction", labels = NULL)
+  ) +
+    labs(
+      title = "Base peak chromatograms for TMT runs",
+      x = "Retention time",
+      y = "Base peak intensity"
+    ) +
+    facet_grid(Fraction ~ Batch, scales = "free_y") +
+    theme_bw() +
+    theme(legend.position = "none")
+  
+  # Save the plot standard size
+  ggsave(paste0(output_dir, "BP TMT chromatograms.png"), width = plot_width, height = plot_height)
+}
+```
+
+## PSMs By RT
+Plot of peptide-spectrum matches by retention time. Coloured by run or condition
+```{r PSMs by retention time plot, echo = FALSE}
+# Make the plot by sample with facet grid by batch/sample
+PSMs %>%
+  ggplot(aes(x = `RT [min]`, color = Fraction)) +
+  geom_density() +
+  scale_y_continuous(
+    name = "Peptide-spectrum matches",
+    breaks = NULL,
+    position = "left",
+    sec.axis = dup_axis(name = "Fraction", labels = NULL)
+  ) +
+  scale_x_discrete(
+    position = "bottom",
+    sec.axis = dup_axis(name = "Batch", labels = NULL)
+  ) +
+  facet_grid(Fraction ~ Batch, scales = "free_y") +
+  labs(
+    title = "PSMs by retention time for TMT runs",
+    x = "Retention time",
+    y = "PSM identifications"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none")
+
+# Save the plot standard size
+ggsave(paste0(output_dir, "TMT PSMs by RT.png"), width = plot_width, height = plot_height)
+```
+
+## Peak widths
+My approach here is to get some extracted ion chromatograms and then measure peak width using full width half height.
+LFQ_peak_width_selection.R script used to determine the peptide to use.
+Use the peptide "[RK].sEVTDLRR.[TA]", RT: ~ 41.5, m/z: ~427.2478
+```{r}
+# List raw files
+raw_files <- list.files(input_dir, full.names = TRUE) %>%
+  grep(pattern = ".raw$", value = TRUE)
+
+# Initialise vector for peak widths
+peak_widths <- numeric(length = length(raw_files))
+names(peak_widths) <- raw_files
+
+# Loop through fractions
+for(fraction in unique(PSMs$Fraction)) {
+  # Set list of raw files for fractions
+  raw_files <- paste0(
+    input_dir,
+    Run_annotations$Run[Run_annotations$Fraction == fraction],
+    ".raw"
+  )
+  
+  # Assign variables by fraction
+  peak_mass <- selected_peptides[[fraction]]$top_mass
+  top_RT <- selected_peptides[[fraction]]$top_RT
+  
+  # Loop through_files
+  for(i in raw_files) {
+    peak_width <- calculate_peak_width(
+      raw_file = i,
+      peak_mass = peak_mass,
+      tol = 5,
+      min_RT = top_RT - 5,
+      max_RT = top_RT + 5
+    )
+    
+    # Assign to vector
+    peak_widths[i] <- peak_width * 60
+  }
+  
+}
+
+# Merge with annotations
+peak_widths <- merge(
+  mutate(
+    Run_annotations,
+    index = paste0(input_dir, "/", Run, ".raw")
+  ),
+  data.frame(
+    Peak_width = peak_widths,
+    index = names(peak_widths)
+  ),
+  by = "index"
+)
+
+# Run some stats
+# Run ANOVA for peak width by sample
+peak_widths %>%
+  anova_test(Peak_width ~ Sample) %>%
+  .$p
+
+# Run ANOVA for peak width by condition
+peak_widths %>%
+  anova_test(Peak_width ~ Condition) %>%
+  .$p
+
+# Run ANOVA for peak width by batch
+peak_widths %>%
+  anova_test(Peak_width ~ Batch) %>%
+  .$p
+
+
+# Example extracted ion chromatogram
+XIC <- rawrr::readChromatogram(rawfile = raw_files[1], mass = 427.2478, tol = 5, type = "xic")
+
+# Extract to a data.frame and make plot
+data.frame(
+  RT = as.numeric(XIC[[1]]$times),
+  Intensity = XIC[[1]]$intensities
+) %>%
+  ggplot(aes(x = RT, y = Intensity)) +
+  geom_line() +
+  labs(
+    title = "Extracted-ion chromatogram m/z: 427.2478",
+    x = "Retention time"
+  ) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# Save the plot standard size
+ggsave(paste0(output_dir, "TMT XIC.png"), width = plot_width, height = plot_height)
+
+# Box plot of peak width by batch
+peak_widths %>%
+  ggplot(aes(x = Batch, y = Peak_width, fill = Batch)) +
+  geom_boxplot() +
+  labs(
+    title = "Full width at half maximum (FWHM) peak width for label free quantification (LFQ) runs (VATVSLPR)",
+    x = "Batch",
+    y = "Peak width (seconds)"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT_peak_width_boxplot.png"), width = plot_width, height = plot_height)
+```
+
+## RT analysis
+Decided to run analysis as follows:
+1. Group PSMs by annotated sequence - get global mean RTs
+2. Group PSMs by run and annotated sequence, get run specific RTs
+3. Merge
+4. Subtract global means from run specific means and look at distribution
+```{r RT analysis}
+# Get global RT means
+glob_RT_means <- PSMs %>%
+  group_by(`Annotated Sequence`) %>%
+  summarise(glob_RT = mean(`RT [min]`, na.rm = TRUE), .groups = "drop")
+
+# Get run specific means and mean differences
+run_RT_means <- PSMs %>%
+  group_by(Run, `Annotated Sequence`) %>%
+  summarise(run_RT = mean(`RT [min]`, na.rm = TRUE), .groups = "drop") %>%
+  merge(glob_RT_means, by = "Annotated Sequence", all.x = TRUE) %>%
+  mutate(RT_dif = run_RT - glob_RT) %>%
+  merge(Run_annotations, all.x = TRUE)
+
+# Run ANOVA for proportion for RT differences by run
+RT_anova <- run_RT_means %>%
+  anova_test(RT_dif ~ Run)
+
+# Print results
+RT_anova$p
+
+# Print mean absolute retention time differences
+mean(abs(run_RT_means$RT_dif))
+
+# Print proportion of absolute delta RT less than 5 minutes
+mean(abs(run_RT_means$RT_dif) < 5)
+mean(abs(run_RT_means$RT_dif) < 0.5)
+
+# Ridgeline plot of RT differences by run
+run_RT_means %>%
+  filter(RT_dif < 2 & RT_dif > -2) %>%
+  ggplot(aes(x = RT_dif, y = Batch, fill = Batch)) +
+  geom_density_ridges() +
+  facet_wrap("Fraction") +
+  scale_y_discrete(limits = rev) +
+  scale_x_continuous(
+    position = "bottom",
+    sec.axis = dup_axis(name = "Fraction", labels = NULL)
+  ) +
+  labs(
+    title = "Peptide retention time differences by run",
+    x = "Peptide retention time difference relative to overall mean (minutes)",
+    y = "Density"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x.top = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT RT difference ridgeline plot.png"), width = plot_width, height = plot_height * 2)
+```
+
+## Protein identifications by Sample
+```{r Protein identifications by key}
+# Summarise counts from PSM data
+ID_counts <- PSMs %>%
+  dplyr::select(c(Run, `Master Protein Accessions`)) %>%
+  unique() %>%
+  group_by(Run) %>%
+  summarise(Protein_count = n()) %>%
+  merge(Run_annotations, by = "Run")
+
+# Run stats and averages
+ID_test <- ID_counts %>%
+  anova_test(Protein_count ~ Batch)
+ID_test$p
+round(mean(ID_counts$Protein_count))
+
+# Make a plot
+ID_counts %>%
+  ggplot(aes(x = Fraction, y = Protein_count, col = Batch)) +
+  geom_point() +
+  annotate("text", x = 2, y = 4000, label = paste0("ANOVA, p = ", round(ID_test$p, 3))) +
+  expand_limits(y = 0) +
+  ggtitle("Identifications by run") +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT IDs by run.png"), width = plot_width, height = plot_height)
+```
+
+## Mass error
+Plot of mass error
+```{r precursor mass error, echo = FALSE}
+# Run ANOVA for proportion for mass error by batch
+# Summarise data - arbitrary significance from large sample size
+mass_er_summary <- PSMs %>%
+  group_by(Run, Batch) %>%
+  summarise(
+   mz = mean(`Deltam/z [Da]`),
+   ppm = mean(`DeltaM [ppm]`),
+   .groups = "drop"
+  )
+
+# Run ANOVA for m/z
+mz_anova <- mass_er_summary %>%
+  anova_test(mz ~ Batch)
+mz_anova$p
+
+# Run ANOVA for ppm
+ppm_anova <- mass_er_summary %>%
+  anova_test(ppm ~ Batch)
+ppm_anova$p
+
+# Summaries
+mean(PSMs$`Deltam/z [Da]`)
+sd(PSMs$`Deltam/z [Da]`)
+mean(PSMs$`DeltaM [ppm]`)
+sd(PSMs$`DeltaM [ppm]`)
+
+# Mean absolute errors
+mean(abs(PSMs$`Deltam/z [Da]`))
+mean(abs(PSMs$`DeltaM [ppm]`))
+mean(abs(PSMs$`DeltaM [ppm]`) < 1)
+
+# Density plot of precursor mass error - PSM level
+PSMs %>%
+  ggplot(aes(x = `Deltam/z [Da]`, colour = Batch)) +
+  geom_density(alpha = 0.2) +
+  scale_x_continuous(
+    position = "bottom",
+    sec.axis = dup_axis(name = "Fraction", labels = NULL)) +
+  labs(
+    title = "Mass error - PSM level by run, TMT data",
+    x = expression(~Delta ~ "m/z (Da)"),
+    y = "Density") +
+  facet_wrap("Fraction", scales = "free_y") +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x.top = element_blank(),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT PSM mass error by run.png"), width = plot_width, height = plot_height)
+
+# Density plot of precursor mass error - PSM level - by Batch - ppm
+PSMs %>%
+  ggplot(aes(x = `DeltaM [ppm]`, colour = Batch)) +
+  geom_density(alpha = 0.2) +
+  scale_x_continuous(
+    position = "bottom",
+    sec.axis = dup_axis(name = "Fraction", labels = NULL)) +
+  labs(
+    title = "Mass error - PSM level by run, TMT data",
+    x = expression(~Delta ~ "m/z (ppm)"),
+    y = "Density") +
+  facet_wrap("Fraction", scales = "free_y") +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x.top = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT PSM mass error by run ppm.png"), width = plot_width, height = plot_height)
+```
+
+## UpSet plots - replication
+Use UpSet plots to look at set overlap in TMT replicates, too many for a venn diagram
+```{r UpSet plot, include = FALSE}
+# prepare the data for UpSet plots. Rows represent proteins, columns represent runs. 1 and 0 are used to represent whether the protein was detected in that sample or not.
+
+# Pivot wider to create the matrix
+UpSet_matrix <- Proteins %>%
+  mutate(present = 1) %>%
+  pivot_wider(
+    id_cols = Accession,
+    names_from = Run,
+    values_from = present,
+    values_fill = 0
+  )
+
+# Make summaries of identifications by run
+fraction_overlaps <- data.frame()
+
+# Loop through fractions
+for(fraction in unique(Run_annotations$Fraction)) {
+  # Make a list of runs to include
+  selected_runs <- Run_annotations %>%
+    filter(Fraction == fraction) %>%
+    pull(Run) %>%
+    as.character()
+  
+  # Filter the matrix
+  filtered_mat <- UpSet_matrix[,selected_runs]
+  
+  # Calculate proportion overlap in all runs
+  prop_all_runs <- mean(rowSums(filtered_mat) == length(selected_runs))
+  
+  # Add to the data
+  fraction_overlaps <- bind_rows(
+    fraction_overlaps,
+    data.frame(
+      Fraction = fraction,
+      n_runs = length(selected_runs),
+      prop_all_runs = prop_all_runs
+    )
+  )
+}
+
+# Present the range
+range(fraction_overlaps$prop_all_runs)
+
+# Make the plot per fraction
+for (i in unique(Run_annotations$Fraction)) {
+  # Make a list of runs to include
+  selected_runs <- Run_annotations %>%
+    filter(Fraction == i) %>%
+    pull(Run) %>%
+    as.character()
+
+  # make the plot
+  upset(
+    UpSet_matrix,
+    selected_runs,
+    name = "Run intersections",
+    width_ratio = 0.1,
+    height_ratio = 0.3,
+    n_intersections = 15,
+    base_annotations = list(
+      "Protein identifications" = intersection_size(text_mapping = aes(label = !!upset_text_percentage()))
+    ),
+    min_degree = 1
+  )
+
+  # Save the plot
+  ggsave(paste0(output_dir, "Fraction ", i, " UpSet plot.png"), width = plot_width * 2, height = plot_height * 2)
+}
+```
+
+## Missing values
+Rather than reporting a heatmap of runs (expected lots of missing values because of fractions), report proportion with missing reporter ions values
+```{r}
+# Create the heatmap
+# Create the presence/absence matrix
+heatmap_data <- MSstatsTMT_processed$ProteinLevelData %>%
+  filter(!(Channel %in% c("126", "135N"))) %>%
+  merge(
+    mutate(Channel_annotations, Sample = paste(Donor, Condition)),
+    by = "Channel") %>%
+  dplyr::select(Sample, Protein) %>%
+  distinct(Sample, Protein) %>%
+  mutate(Present = TRUE) %>%
+  complete(Sample, Protein, fill = list(Present = FALSE))
+
+# Convert to wide format for clustering
+wide_matrix <- heatmap_data %>%
+  pivot_wider(names_from = Sample, values_from = Present, values_fill = FALSE) %>%
+  tibble::column_to_rownames("Protein") %>%
+  as.matrix()
+
+# Perform hierarchical clustering on proteins (rows)
+protein_dist <- dist(wide_matrix * 1, method = "binary")  # binary distance for TRUE/FALSE
+protein_hclust <- hclust(protein_dist)
+protein_order <- rownames(wide_matrix)[protein_hclust$order]
+
+# Get number of missing values
+signif(mean(!heatmap_data$Present) * 100, digits = 2)
+
+# Plot with ordered proteins
+heatmap_data %>%
+  mutate(Protein = factor(Protein, levels = protein_order)) %>%
+  ggplot(aes(x = Sample, y = Protein, fill = Present)) +
+  geom_tile() +
+  scale_fill_manual(values = c("TRUE" = "black", "FALSE" = "white")) +
+  theme_bw() +
+  labs(
+    x = "Sample",
+    y = "Protein",
+    fill = "Identified",
+    title = "TMT reporter ion missing values") +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.text.y = element_blank(),
+    panel.grid = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT missing values heatmap.png"), width = plot_width, height = plot_height)
+```
+
+## Normalisation
+```{r Normalisation}
+# Protein level normalisation plots
+# TMT run intensity plot
+rbind(
+  mutate(
+    MSstatsTMT_processed$ProteinLevelData,
+    Normalisation = "Normalised"
+  ),
+  mutate(
+    MSstatsTMT_processed_no_normalisation$ProteinLevelData,
+    Normalisation = "Original"
+  )
+) %>%
+  ggplot(aes(x = Run, y = Abundance, fill = Run)) +
+  geom_boxplot() +
+  stat_compare_means(
+    method = "anova",
+    aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
+  facet_wrap("Normalisation") +
+  labs(
+    x = "Run",
+    y = "Protein-level abundance",
+    title = "Protein level TMT protein abundances by run",
+    fill = "Run"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT protein level run intensities.png"), width = plot_width, height = plot_height)
+```
+
+## Precursor charge
+```{r Precursor charge}
+# Format the data
+charge_data <- PSMs %>%
+  mutate(Charge = as.factor(Charge)) %>%
+  group_by(Run, Charge) %>%
+  summarise(count = n()) %>%
+  group_by(Charge) %>%
+  summarise(Proportion = sum(count), SD = sd(count)) %>%
+  mutate(
+    Proportion = Proportion / nrow(PSMs),
+    SD = SD / nrow(PSMs))
+
+# Add empty row for charge = 1
+charge_data <- bind_rows(
+  tibble(Charge = factor("1"), Proportion = 0, SD = 0),
+  charge_data
+) %>%
+  mutate(Charge = factor(Charge, levels = sort(as.numeric(levels(Charge)))))
+
+# Make the plot
+charge_data %>%
+  ggplot(aes(x = Charge, y = Proportion, ymin = Proportion - SD, ymax = Proportion + SD, fill = Charge)) +
+  geom_col() +
+  geom_errorbar(data = . %>% filter(Charge != 1), width = 0.2) +
+  scale_y_continuous(
+    limits = c(0, 0.7),
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(
+    x = "Precursor charge - label free quantification runs",
+    y = "Proportion of PSMs",
+    title = "Precursor charge distribution"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT precursor charge.png"), width = plot_width, height = plot_height)
+```
+
+## Peptide length
+```{r}
+# Summarise data
+peptide_lengths <- PSMs %>%
+  mutate(
+    Length = as.factor(nchar(gsub("^\\[.*?\\].|.\\[.*?\\]$", "", `Annotated Sequence`)))) %>%
+  group_by(Run, Length) %>%
+  summarise(count = n()) %>%
+  group_by(Length) %>%
+  summarise(Proportion = sum(count), SD = sd(count)) %>%
+  mutate(Proportion = Proportion / nrow(PSMs), SD = SD / nrow(PSMs))
+
+# Present most common length
+peptide_lengths[which.max(peptide_lengths$Proportion),]
+sum(as.numeric(peptide_lengths$Length) * peptide_lengths$Proportion, na.rm = TRUE)
+
+# Make a plot
+peptide_lengths %>%
+  ggplot(aes(x = Length, y = Proportion, ymin = Proportion - SD, ymax = Proportion + SD, fill = Length)) +
+  geom_col() +
+  geom_errorbar(width = 0.2) +
+  scale_y_continuous(
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(
+    x = "Peptide length",
+    y = "Proportion of PSMs",
+    title = "Peptide length - TMT runs"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT peptide lengths.png"), width = plot_width, height = plot_height)
+```
+
+## Unique peptides
+```{r}
+# Get some stats
+mean(Proteins$`# Unique Peptides` == 0) * 100
+mean(Proteins$`# Unique Peptides` == 1) * 100
+
+# Summarise the data
+unique_peptides <- Proteins %>%
+  group_by(Run, `# Unique Peptides`) %>%
+  mutate(`# Unique Peptides` = as.factor(
+    ifelse(as.numeric(`# Unique Peptides`) >= 20, "20+", as.character(`# Unique Peptides`))
+  )) %>%
+  summarise(count = n()) %>%
+  group_by(`# Unique Peptides`) %>%
+  summarise(Proportion = sum(count), SD = sd(count)) %>%
+  mutate(Proportion = Proportion / nrow(Proteins), SD = SD / nrow(Proteins))
+
+# Make a plot
+unique_peptides %>%
+  ggplot(aes(x = factor(`# Unique Peptides`, levels = c(as.character(0:19), "20+")), y = Proportion, ymin = Proportion - SD, ymax = Proportion + SD, fill = `# Unique Peptides`)) +
+  geom_col() +
+  geom_errorbar(width = 0.2) +
+  scale_y_continuous(
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(
+    x = "Number of unique peptides per protein",
+    y = "Proportion of identified proteins",
+    title = "Protein unique peptide counts - TMT runs"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT unique peptides.png"), width = plot_width, height = plot_height)
+```
+
+## Protein coverage
+```{r}
+mean(Proteins$`Coverage [%]`)
+mean(Proteins$`Coverage [%]` > 3.74)
+
+# Density plot of protein coverage
+Proteins %>%
+  ggplot(aes(x = `Coverage [%]`)) +
+  geom_density() +
+  labs(
+    x = "Protein sequence coverage (%)",
+    y = "Density",
+    title = "Protein sequence coverage - TMT runs"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT protein coverage.png"), width = plot_width, height = plot_height)
+```
+
+## Sequest score
+```{r}
+mean(Proteins$`Score Sequest HT: Sequest HT`)
+
+# Density plot of protein coverage
+Proteins %>%
+  ggplot(aes(x = `Score Sequest HT: Sequest HT`)) +
+  geom_density() +
+  scale_x_continuous(trans = "log2") +
+  labs(
+    x = "Sequest HT score (log 2 scale)",
+    y = "Density",
+    title = "Sequest HT scores - TMT runs"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "TMT SEQUEST scores.png"), width = plot_width, height = plot_height)
+```
