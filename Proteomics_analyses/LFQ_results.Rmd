@@ -1,0 +1,1096 @@
+---
+title: "LFQ MS results plotting"
+author: "Sam Siljee"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages
+library(dplyr) # Data wrangling
+library(tidyr) # For `pivot_longer` in labelling efficiency graph
+library(stringr) # For editing strings in annotations files for matrixes
+library(readxl) # Read in IPA results
+library(ggplot2) # Plotting
+library(ComplexHeatmap) # Making the heatmaps
+library(RCy3) # Make network plots
+library(biomaRt) # Uniprot/gene ID mappings
+library(pathview) # Pathview plots
+library(evoGO) # Got term enrichment, note package is from github devtools::install_github("Evotec-Bioinformatics/evoGO")
+library(fgsea) # GSEA analysis
+library(msigdbr) # GSEA gene sets
+
+# User variables
+log_2_FC_cutoff <- log2(1.3)
+adj_p_value_cutoff <- 0.05
+input_dir <- paste0(getwd(), "/data/LFQ/")
+output_dir <- paste0(getwd(), "/../produced_plots/MS_results/LFQ/")
+
+# Files to load
+processed_file <- "LFQ_processed.rda"
+results_file <- "MSstats_results.rda"
+plot_width <- 8
+plot_height <- 5.5
+IPA_file <- "LFQ_summary_processed.xls"
+annotations_file <- "annotations.tsv"
+FASTA_file <- "Human_swissprot_no_iso_20250915.fasta"
+contaminants_FASTA_file <- "0602_Cell_Culture_Contaminants_GFP_to_eGFP_edit.fasta"
+# pulse_genes_file <- "p53_pulse_response_genes.csv"
+prots_of_interest_file <- "LFQ_proteins_of_interest.txt"
+
+# Get the number of available cores, reserve 20% for other tasks
+available_cores <- floor(0.8 * parallel::detectCores())
+# Set GO term domains to use
+GO_domains <- c("BP", "CC", "MF")
+```
+
+## Load the data
+```{r load data, include = FALSE}
+# Load custom functions
+source(paste0(input_dir, "../../../Functions.R"))
+
+# Contaminant species vector
+cont_species <- readLines(paste0(input_dir, contaminants_FASTA_file)) %>%
+  grep(pattern = ">", value = TRUE) %>% # Extract only lines with info
+  str_match(pattern = "OS=(.*?)\\s*OX=") %>% # Extract just the species
+  .[,2]
+
+# Get list of contaminant IDs, filtering out human proteins
+cont_ids <- read_FASTA_names(paste0(input_dir, contaminants_FASTA_file))[cont_species != "Homo sapiens"]
+
+# Vector of proteins of interest - manually curated for biological interest
+prots_of_interest <- readLines(paste0(input_dir, prots_of_interest_file))
+
+# Loading the results
+load(paste0(input_dir, results_file))
+
+# Process results, filter etc
+results <- as.data.frame(MSstats_results) %>%
+  filter(Label == "P53 KD vs control") %>% # Only keep one comparison
+  filter(!Protein %in% cont_ids) %>% # Remove contaminants
+  mutate(Protein = str_remove(Protein, "Cont_"), Dif = NA) # Remove "Cont_" tag from remaining human contaminants, and reset Dif column - not properly calculated in the MSstats workflow
+
+# Add column for up/downregulated or non-significant
+results$Dif <- ifelse(
+  results$log2FC > log_2_FC_cutoff & results$adj.pvalue < adj_p_value_cutoff,
+  "Upregulated",
+  ifelse(
+    results$log2FC < -log_2_FC_cutoff & results$adj.pvalue < adj_p_value_cutoff,
+    "Downregulated",
+    "Not significant"
+  )
+)
+
+# Add list of entrez IDs to results data
+results <- merge(
+  mutate(results, Protein_first = sub(";.*", "", Protein)),
+  gene_map,
+  by.x = "Protein_first",
+  by.y = "uniprotswissprot",
+  all.x = TRUE)
+
+# Load IPA results
+sheet_names <- excel_sheets(paste0(input_dir, IPA_file)) # Get sheet names
+IPA_results <- lapply(sheet_names, function(x) { # Read all sheets to list
+  as.data.frame(read_excel(paste0(input_dir, IPA_file), sheet = x))
+})
+names(IPA_results) <- sheet_names # Rename list elements
+
+# Load processed protein lists
+load(paste0(input_dir, processed_file))
+
+# Load annotations for matrixes
+annotations <- read.delim(paste0(input_dir, annotations_file), header = TRUE) %>%
+  # Add sample column to use as labels
+  mutate(Sample = paste(BioReplicate, Condition, sep = "_")) %>%
+  group_by(Sample) %>%
+  mutate(Sample = paste0(Sample, "_", row_number())) %>%
+  ungroup() %>%
+  mutate(
+      across(
+        c(
+          Condition,
+          BioReplicate,
+          Run,
+          Sex,
+          Smoker,
+          Sample
+        ),
+        as.factor
+      )
+    )
+
+# Protein matrix for LFQ data
+prot_mat <- ({
+  df <- merge(
+    x = mutate(
+      MSstats_processed$ProteinLevelData,
+      Run = as.character(originalRUN)
+    ),
+    y = mutate(
+      annotations,
+      Run = str_remove(Run, "\\.")
+    ),
+    by = "Run",
+    all.x = TRUE
+  ) %>%
+    dplyr::select(Protein, Sample, LogIntensities) %>%
+    pivot_wider(names_from = Sample, values_from = LogIntensities)
+
+  df_mat <- as.matrix(df[, -1])
+
+  row.names(df_mat) <- df$Protein
+
+  df_mat
+})
+
+# Feature level data matrix
+feat_mat <- ({
+  df <- merge(
+    x = mutate(
+      MSstats_processed$FeatureLevelData,
+      Run = as.character(originalRUN)
+    ),
+    y = mutate(
+      annotations,
+      Run = str_remove(Run, "\\.")
+    ),
+    by = "Run",
+    all.x = TRUE
+  ) %>%
+    dplyr::select(FEATURE, Sample, newABUNDANCE) %>%
+    pivot_wider(names_from = Sample, values_from = newABUNDANCE)
+
+  df_mat <- as.matrix(df[, -1])
+
+  row.names(df_mat) <- df$FEATURE
+
+  df_mat
+})
+
+# Protein matrix by donor rather than technical replicate
+donor_prot_mat <- ({
+  df <- merge(
+    x = mutate(
+      MSstats_processed$ProteinLevelData,
+      Run = as.character(originalRUN)
+    ),
+    y = mutate(
+      annotations,
+      Run = str_remove(Run, "\\.")
+    ),
+    by = "Run",
+    all.x = TRUE
+  ) %>%
+    mutate(Sample = paste0(BioReplicate, "_", Condition)) %>%
+    group_by(Sample, Protein) %>%
+    summarise(LogIntensities = mean(LogIntensities, na.rm = TRUE)) %>%
+    pivot_wider(names_from = Sample, values_from = LogIntensities)
+
+  df_mat <- as.matrix(df[, -1])
+
+  row.names(df_mat) <- df$Protein
+
+  df_mat
+})
+
+# List of differentially expressed genes for enrichment analysis
+DEGs <- results %>%
+  filter(Dif == "Upregulated" | Dif == "Downregulated") %>%
+  .$ensembl_gene_id %>%
+  unique() %>%
+  na.omit()
+
+# List of differentially expressed Uniprot IDs for network analysis
+Dif_prots <- results %>%
+  filter(Dif == "Upregulated" | Dif == "Downregulated") %>%
+  .$Protein_first %>%
+  unique() %>%
+  na.omit()
+
+# Set reference set for enrichment analysis - use only quantified proteins
+reference_set <- results[!is.na(results$log2FC),]$ensembl_gene_id %>% unique() %>% na.omit()
+```
+
+## Quant numbers
+Note that in the text I use numbers including the potential contaminants
+```{r}
+print(paste("Quantified proteins:", sum(!is.na(results$log2FC))))
+print(paste("Present in only one condition:", nrow(filter(results, log2FC == Inf | log2FC == -Inf))))
+print(paste("Upregulated:", sum(results$Dif == "Upregulated", na.rm = TRUE)))
+print(paste("Downregulated:", sum(results$Dif == "Downregulated", na.rm = TRUE)))
+print(paste("Prop statistically significant proteins:", mean(results$adj.pvalue < adj_p_value_cutoff, na.rm = TRUE)))
+print(paste("Prop biologically significant proteins:", mean(abs(results$log2FC) > log_2_FC_cutoff, na.rm = TRUE)))
+
+# Save table for top 15 (manual) proteins of interest
+write.csv(filter(results, Protein %in% prots_of_interest), paste0(output_dir, "proteins_of_interest.csv"))
+# Save table for top 15 proteins by adjusted p-value
+results %>%
+  filter(!is.na(pvalue)) %>%
+  arrange(adj.pvalue) %>%
+  .[1:15,] %>%
+  write.csv(paste0(output_dir, "top_dif_proteins.csv"))
+
+# Save some spread sheets for appendixes
+# .csv of protein-level abundances
+write.csv(MSstats_processed$ProteinLevelData, paste0(output_dir, "protein_level_LFQ_abundances.csv"))
+# .csv of feature-level abundances
+write.csv(MSstats_processed$FeatureLevelData, paste0(output_dir, "feature_level_LFQ_abundances.csv"))
+# .csv of differential abundances
+write.csv(results, paste0(output_dir, "differential_abundances_LFQ.csv"))
+```
+
+## Volcano plot
+```{r Volcano plot, include = FALSE}
+# Set colours as a named vector
+colours <- c("red", "blue", "black")
+names(colours) <- c("Upregulated", "Downregulated", "Not significant")
+
+# Make the plot - LFQ results
+results %>%
+  ggplot(aes(x = log2FC, y = -log10(adj.pvalue), col = Dif)) +
+  geom_vline(xintercept = c(-log_2_FC_cutoff, log_2_FC_cutoff), linetype = "dashed", colour = "black") +
+  geom_hline(yintercept = -log10(adj_p_value_cutoff), linetype = "dashed", colour = "red") +
+  geom_point(alpha = 0.25, show.legend = FALSE) +
+  scale_color_manual(values = colours) +
+  labs(
+    x = "Log 2 fold-change",
+    y = "-Log10(adjusted p-value)",
+    title = "Volcano plot - LFQ results"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ volcano plot.png"), width = plot_width, height = plot_height)
+
+# Volcano plot of all sub-group analyses
+as.data.frame(MSstats_results) %>%
+  filter(!Protein %in% cont_ids) %>%
+  ggplot(aes(x = log2FC, y = -log10(adj.pvalue), col = Dif)) +
+  geom_vline(xintercept = c(-log_2_FC_cutoff, log_2_FC_cutoff), linetype = "dashed", colour = "black") +
+  geom_hline(yintercept = -log10(adj_p_value_cutoff), linetype = "dashed", colour = "red") +
+  geom_point(alpha = 0.25, show.legend = FALSE) +
+  facet_wrap("Label") +
+  scale_color_manual(values = colours) +
+  labs(
+    x = "Log 2 fold-change",
+    y = "-Log10(adjusted p-value)",
+    title = "Volcano plot - LFQ results"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ volcano subgroup plot.png"), width = plot_width, height = plot_height)
+```
+
+## Subgroup analysis
+Some numbers to support the statements that the paired design for KD vs control is stronger than F vs M for example
+```{r Subgroup analysis}
+# Print counts of differentially abundant proteins by subgroup analyses
+FvM_dif_count <- as.data.frame(MSstats_results) %>%
+    filter(!Protein %in% cont_ids & Label == "F vs M" & !is.na(pvalue) & adj.pvalue < adj_p_value_cutoff & abs(log2FC) > log_2_FC_cutoff) %>% nrow
+print(paste("Differentially abundant protein count for M v F:", FvM_dif_count))
+NSvS_dif_count <- as.data.frame(MSstats_results) %>%
+    filter(!Protein %in% cont_ids & Label == "NS vs S" & !is.na(pvalue) & adj.pvalue < adj_p_value_cutoff & abs(log2FC) > log_2_FC_cutoff) %>% nrow
+print(paste("Differentially abundant protein count for NS v S:", NSvS_dif_count))
+
+# Calculate proportion of proteins reaching statistical significance
+MSstats_results %>%
+  filter(Label %in% c("F vs M", "NS vs S", "P53 KD vs control")) %>%
+  group_by(Label) %>%
+  summarise(pval = mean(adj.pvalue < adj_p_value_cutoff, na.rm = T))
+```
+
+## PCA analysis
+PCA analysis and plots, along with eigen value plots
+```{r PCA}
+# Run PCA analysis on feature-level data
+# Run PCA analysis
+LFQ_PCA <- prcomp(t(na.omit(feat_mat)), center = TRUE, scale. = TRUE)
+
+PCA_data <- merge(
+  LFQ_PCA$x,
+  annotations,
+  by.x = "row.names",
+  by.y = "Sample"
+) %>%
+  mutate(BioReplicate = as.factor(BioReplicate))
+
+# PCA plot PC1 vs PC2
+PCA_data %>%
+  ggplot(aes(x = PC1, y = PC2, colour = Condition, shape = BioReplicate)) +
+  geom_point() +
+  scale_shape_manual(values = 1:8) +
+  stat_ellipse(aes(group = Condition)) +
+  labs(
+    x = paste0(
+      "PC1 (",
+      round(summary(LFQ_PCA)$importance[2, 1] * 100, digits = 1),
+      "%)"
+    ),
+    y = paste0(
+      "PC2 (",
+      round(summary(LFQ_PCA)$importance[2, 2] * 100, digits = 1),
+      "%)"
+    ),
+    title = "PCA plot - LFQ data",
+    color = "Condition",
+    shape = "Donor"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ PCA plot.png"), width = plot_width, height = plot_height)
+
+# Eigen value plot = first 15 values
+data.frame(
+  Proportion = summary(LFQ_PCA)$importance[2,1:15],
+  PC = 1:15
+) %>%
+  ggplot(aes(x = PC, y = Proportion)) +
+  geom_col(stat = "identity") +
+  labs(
+    x = "Principle component",
+    y = "Proportion",
+    title = "Eigenvalue plot - top 15 principle components"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ eigenvalue plot.png"), width = plot_width, height = plot_height)
+
+# PCA plots by smoking status
+PCA_data %>%
+  ggplot(aes(x = PC1, y = PC2, colour = Smoker, shape = BioReplicate)) +
+  geom_point() +
+  scale_shape_manual(values = 1:8) +
+  stat_ellipse(aes(group = Smoker)) +
+  labs(
+    x = paste0(
+      "PC1 (",
+      round(summary(LFQ_PCA)$importance[2, 1] * 100, digits = 1),
+      "%)"
+    ),
+    y = paste0(
+      "PC2 (",
+      round(summary(LFQ_PCA)$importance[2, 2] * 100, digits = 1),
+      "%)"
+    ),
+    title = "PCA plot - LFQ data",
+    color = "Smoker",
+    shape = "Donor"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ PCA smoking plot.png"), width = plot_width, height = plot_height)
+
+# Plot by Sex
+PCA_data %>%
+  ggplot(aes(x = PC1, y = PC2, colour = Sex, shape = BioReplicate)) +
+  geom_point() +
+  scale_shape_manual(values = 1:8) +
+  stat_ellipse(aes(group = Sex)) +
+  labs(
+    x = paste0(
+      "PC1 (",
+      round(summary(LFQ_PCA)$importance[2, 1] * 100, digits = 1),
+      "%)"
+    ),
+    y = paste0(
+      "PC2 (",
+      round(summary(LFQ_PCA)$importance[2, 2] * 100, digits = 1),
+      "%)"
+    ),
+    title = "PCA plot - LFQ data",
+    color = "Condition",
+    shape = "Donor"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ PCA sex plot.png"), width = plot_width, height = plot_height)
+
+# Print some numbers for justification of feature level data over protein level data.
+print("Number of datapoints protein level data:")
+print(nrow(prot_mat))
+print("Number of datapoints feature level data:")
+print(nrow(feat_mat))
+print("Percent missing values protein level data:")
+print(mean(is.na(prot_mat)))
+print("Percent missing values feature level data:")
+print(mean(is.na(feat_mat)))
+```
+
+## Heatmaps
+Add in a heatmap of LFQ and TMT data combined to check how they cluster together. Do the same for PCA plot perhaps?
+```{r Heatmaps, include = FALSE}
+# LFQ unfiltered heatmap - including NA's
+make_custom_heatmap(
+  input_matrix = prot_mat,
+  include_NAs = TRUE,
+  condition_annotations = str_split_i(colnames(prot_mat), "_", 2),
+  donor_annotations = str_split_i(colnames(prot_mat), "_", 1),
+  na_col = "gray",
+  annot_col = custom_colours,
+  column_title = "Label free quatification proteomics heatmap",
+  output_dir = paste0(output_dir, "heatmaps/"),
+  file_name = "LFQ_heatmap_all_missing_values.png"
+)
+
+# LFQ filtered heatmap - by donor
+make_custom_heatmap(
+  input_matrix = donor_prot_mat,
+  include_NAs = FALSE,
+  filter_list = Dif_prots,
+  condition_annotations = str_split_i(colnames(donor_prot_mat), "_", 2),
+  donor_annotations = str_split_i(colnames(donor_prot_mat), "_", 1),
+  annot_col = custom_colours,
+  column_title = "LFQ donors - differential proteins",
+  output_dir = paste0(output_dir, "heatmaps/"),
+  file_name = "LFQ_heatmap_filtered_by_donor.png"
+)
+```
+
+## GO term enrichment
+Use evoGO to remove redundant terms, alternatively topGO could be used.
+```{r evoGO}
+# Get GO term annotations
+if(file.exists(paste0(input_dir, "evogo__go20251010__ensembl115__specieshsapiens.rds"))) { # Load downloaded GO annotations
+  GO_annotation <- loadGOAnnotation(
+    species = "hsapiens",
+    goRelease = "2025-10-10",
+    ensemblRelease = 115,
+    path = input_dir
+  )
+} else { # Get GO annotations
+  GO_annotation <- getGOAnnotation(
+    species = "hsapiens",
+    goRelease = "2025-10-10",
+    ensemblRelease = 115,
+    nCores = available_cores,
+    save = TRUE,
+    path = input_dir
+  )
+}
+
+# Initialise list for GO term enrichment results
+evoGO_results <- list()
+
+# Perform GO enrichment analysis - loop through domains
+for(d in GO_domains) {
+  evoGO_results[[d]] <- calcGOenrichment(
+    goAnnotation = GO_annotation,
+    deGenes = DEGs,
+    universe = reference_set,
+    domain = d,
+    minGenes = 5,
+    k = 1,
+    nCores = available_cores)
+}
+
+# Summarise the numbers
+evoGO_summary <- data.frame()
+
+for(d in GO_domains) {
+  evoGO_summary <- bind_rows(
+    evoGO_summary,
+    data.frame(
+      Domain = d,
+      Total_IDs = nrow(evoGO_results[[d]]),
+      Sig_IDs = sum(evoGO_results[[d]]$fisher.pvalue < adj_p_value_cutoff),
+      Reduntant_IDs = sum(evoGO_results[[d]]$fisher.pvalue < adj_p_value_cutoff) - sum(evoGO_results[[d]]$evogo.pvalue < adj_p_value_cutoff)
+    )
+  )
+}
+
+evoGO_summary
+
+# Make plots for each domain
+for(d in GO_domains) {
+  evoGO_results[[d]] %>%
+    mutate(
+      Ratio = significant / annotated
+    ) %>% # Add useful columns
+    arrange(evogo.pvalue) %>% # Sort by p-value - evoGO algorythm
+    .[1:15, ] %>% # Select the top 15
+    arrange(desc(evogo.pvalue)) %>% # Reverse order
+    mutate(name = as.factor(str_trunc(name, 40))) %>%
+    mutate(name = factor(name, levels = name)) %>% # Rearrange the order
+    ggplot(aes(x = Ratio, y = name, size = annotated, colour = evogo.pvalue)) +
+    geom_point() +
+    labs(
+      title = paste0("Top 15 enriched GO terms - ", d),
+      x = "Ratio",
+      y = "GO term",
+      colour = "evoGO algorithm p-value",
+      size = "Gene count"
+    ) +
+    theme_bw()
+  
+  # Save the plot
+  ggsave(paste0(output_dir, d, " GO term plot.png"), width = plot_width, height = plot_height)
+}
+
+# Export table of all GO term results
+GO_results_tab <- data.frame()
+for(d in GO_domains){
+  GO_results_tab <- bind_rows(
+    GO_results_tab,
+    mutate(evoGO_results[[d]], domain = d)
+  )
+}
+write.csv(GO_results_tab, paste0(output_dir, "GO_term_results.csv"))
+```
+
+## GSEA
+Gene set enrichment analysis. Using fgsea.
+Based on the method shown in this tutorial:
+https://biostatsquid.com/fgsea-tutorial-gsea/
+```{r}
+# Get gene sets, use all pathways
+gene_sets_df <- msigdbr(db_species = "HS", species = "Homo sapiens")
+
+# Convert to named list format required by fgsea
+gene_sets <- gene_sets_df %>%
+  split(x = .$ensembl_gene, f = .$gs_name)
+
+# # Add in custom gene sets from pulsatile p53 response
+# custom_gene_sets <- list(
+#   "Porter_p53_pulsatile_target_genes" = unique(na.omit(pulse_genes$ensembl_gene_id[pulse_genes$Group == "Pulsing"])),
+#   "Porter_p53_rising_target_genes" = unique(na.omit(pulse_genes$ensembl_gene_id[pulse_genes$Group == "Rising"]))
+# )
+# 
+# # Add to gene sets
+# gene_sets <- c(gene_sets, custom_gene_sets)
+
+# Prepare list of ranked genes. Use sign from foldchange, and magnitude from p-value
+rankings <- results %>%
+  mutate(ranking = sign(log2FC) * -log10(pvalue)) %>%
+  group_by(ensembl_gene_id) %>%
+  summarise(ranking = mean(ranking, na.rm = TRUE), .groups = "drop") %>%
+  filter(!is.na(ensembl_gene_id) & !is.na(ranking)) %>%
+  arrange(desc(ranking)) %>%
+  pull(ranking, name = ensembl_gene_id)
+
+# Run GSEA
+GSEA_res <- fgsea(
+  pathways = gene_sets,
+  stats = rankings,
+  scoreType = 'std',
+  minSize = 10,
+  maxSize = 500)
+
+# Print some stats
+print("Total number of pathways:")
+nrow(GSEA_res)
+
+print("Total number of statistically significant pathways")
+sum(GSEA_res$padj < 0.05)
+
+print("Total number of statistically significant upregulated pathways")
+sum(GSEA_res$padj < 0.05 & GSEA_res$ES > 0)
+
+print("Total number of statistically significant downregulated pathways")
+sum(GSEA_res$padj < 0.05 & GSEA_res$ES < 0)
+
+top_pathways_up <- GSEA_res[ES > 0][head(order(padj), n = 15), pathway]
+top_pathways_down <- GSEA_res[ES < 0][head(order(padj), n = 15), pathway]
+top_pathways <- c(top_pathways_up, rev(top_pathways_down))
+
+# Get significant pathways related to p53
+p53_pathways <- GSEA_res %>%
+  filter(padj < 0.05 & grepl("P53", pathway)) %>%
+  .$pathway
+
+# # Look at custom gene sets
+# pulsatile_p53 <- GSEA_res %>%
+#   filter(grepl("Porter", pathway))
+
+# Plot table of results
+plotGseaTable(
+  pathways = gene_sets[top_pathways],
+  stats = rankings,
+  fgseaRes = GSEA_res,
+  gseaParam = 0.5
+)
+
+# Save the plot
+ggsave(paste0(output_dir, "GSEA tab.png"), width = plot_width, height = plot_height)
+
+# Plot table of p53 results
+plotGseaTable(
+  pathways = gene_sets[p53_pathways],
+  stats = rankings,
+  fgseaRes = GSEA_res,
+  gseaParam = 1
+)
+
+# Save the plot
+ggsave(paste0(output_dir, "GSEA p53 tab.png"), width = plot_width, height = plot_height)
+
+# Get adjusted p-value for "FISCHER_DIRECT_P53_TARGETS_META_ANALYSIS"
+GSEA_res[GSEA_res$pathway == "FISCHER_DIRECT_P53_TARGETS_META_ANALYSIS",]$padj
+
+# Plot the pathway "FISCHER_DIRECT_P53_TARGETS_META_ANALYSIS"
+plotEnrichment(
+  gene_sets[["FISCHER_DIRECT_P53_TARGETS_META_ANALYSIS"]],
+  rankings) + 
+  labs(
+    title = "Curated pathway: Direct p53 targets meta analysis (Fischer et. al.)",
+    x = "Rank",
+    y = "Enrichment score (ES)") + 
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "GSEA p53.png"), width = plot_width, height = plot_height)
+
+# Get list of hallmark pathways
+H_paths <- GSEA_res %>% filter(padj < 0.05) %>% .$pathway %>% grep(pattern = "HALLMARK_", value = T)
+
+# Plot the hallmark pathways
+for(pathway in H_paths) {
+  plotEnrichment(
+  gene_sets[[pathway]],
+  rankings) +
+  labs(
+    title = str_replace_all(str_replace(str_to_title(pathway), "Hallmark_", ""), "_", " "),
+    x = "Rank",
+    y = "Enrichment score (ES)") + 
+  theme_bw()
+  
+  # Save the plot
+  ggsave(paste0(output_dir, "GSEA ", pathway, ".png"), width = plot_width/2, height = plot_height/2)
+}
+
+# Merge GSEA results with more details from the gene sets data table and save as a .csv
+gene_sets_df %>%
+  dplyr::select(-c(gene_symbol, ncbi_gene, ensembl_gene, db_gene_symbol, db_ncbi_gene, db_ensembl_gene, source_gene)) %>%
+  unique() %>%
+  right_join(GSEA_res, by = c("gs_name" = "pathway")) %>%
+  lapply(as.character) %>%
+write.csv(paste0(output_dir, "LFQ_GSEA_results.csv"))
+```
+
+## Pathview plots
+Use the Identified KEGG pathways from GSEA for pathview analysis
+```{r Pathview plots, echo = FALSE, eval = FALSE}
+# Get list of significant KEGG pathways
+KEGG_pathways <- GSEA_res %>%
+  filter(padj < 0.05 & grepl("KEGG", pathway)) %>%
+  .$pathway
+
+# Count number of enriched pathways
+length(KEGG_pathways)
+
+# Change working directory so pathview plots save in the correct location
+og_dir <- getwd()
+setwd(paste0(output_dir, "pathview_plots/"))
+
+# make plots for all pathways
+tmp <- pathview(
+  gene.data = pull(results, log2FC, name = ensembl_gene_id),
+  pathway.id = c(
+    "hsa00900",
+    "hsa04115",
+    "hsa03060",
+    "hsa03010"
+  ),
+  species = "Homo sapiens",
+  gene.idtype = "ensembl",
+  multi.state = TRUE,
+  kegg.native = TRUE
+)
+
+# Return to original working directory
+setwd(og_dir)
+```
+
+# IPA
+## IPA hit summary
+Summary of number of hits in each category
+```{r}
+# Select results to summarise and relevant stat filtering
+results_to_analyse <- c("CP", "UR", "CN", "D", "TF", "RE", "N", "ITL")
+stats_to_analyse <- c("-log(p-value)", "p-value of overlap", "Network bias-corrected p-value", "p-Value", "p-Value", "Consistency Score", "Score", "-log(p-value)")
+
+# Initialise data frame
+IPA_summary <- data.frame()
+
+for(i in 1:length(results_to_analyse)){
+  IPA_summary <- bind_rows(
+    IPA_summary,
+    data.frame(
+      Category = results_to_analyse[i],
+      Stat = stats_to_analyse[i],
+      "Identification number" = nrow(IPA_results[[results_to_analyse[i]]]),
+      "Significant number" = sum(IPA_results[[results_to_analyse[i]]][,stats_to_analyse[i]] < 0.05)
+    )
+  )
+}
+
+# Manually correct for p-values using -log
+IPA_summary[IPA_summary$Category == "CP",]$Significant.number <- sum((10 ^ -IPA_results[["CP"]]$`-log(p-value)`) < 0.05)
+IPA_summary[IPA_summary$Category == "ITL",]$Significant.number <- sum((10 ^ -IPA_results[["ITL"]]$`-log(p-value)`) < 0.05)
+
+# Save results
+write.csv(IPA_summary, paste0(output_dir, "IPA_summary.csv"), row.names = FALSE)
+```
+
+## IPA CP
+IPA Canonical Pathway
+Standard GO term enrichment style plots
+```{r IPA CN}
+# Plot pathways, GO term style
+IPA_results$CP %>%
+  mutate(
+    Count = str_count(Molecules, ",") + 1,
+    `p-value` = 10^-`-log(p-value)`,
+    `Ingenuity Canonical Pathways` = factor(`Ingenuity Canonical Pathways`,
+      levels = `Ingenuity Canonical Pathways`
+    )
+  ) %>% # Add useful columns
+  arrange(`p-value`) %>% # Sort by p-value
+  .[1:15, ] %>% # Select the top 15
+  ggplot(aes(x = Ratio, y = `Ingenuity Canonical Pathways`, size = Count, col = zScore)) +
+  geom_point() +
+  scale_color_gradient2(
+  midpoint = 0,
+  low = "blue",
+  mid = "white",
+  high = "red",
+  space = "Lab") +
+  labs(
+    title = "Top 15 IPA canonical pathways"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ IPA CP.png"), width = plot_width, height = plot_height)
+```
+
+## IPA UR
+IPA Upstream Regulators
+Standard GO term enrichment style plots
+```{r IPA UR}
+# Plot pathways, GO term style
+IPA_results$UR %>%
+  mutate(
+    Count = str_count(`Target molecules in dataset`, ",") + 1,
+    `p-value` = `p-value of overlap`,
+    `Upstream Regulator` = factor(`Upstream Regulator`,
+      levels = `Upstream Regulator`
+    )
+  ) %>% # Add useful columns
+  arrange(`p-value`) %>% # Sort by p-value
+  .[1:15, ] %>% # Select the top 15
+  ggplot(aes(x = `Predicted Activation State`, y = `Upstream Regulator`, size = Count, col = `Bias-corrected z-score`)) +
+  geom_point() +
+  scale_color_gradient2(
+  midpoint = 0,
+  low = "blue",
+  mid = "white",
+  high = "red",
+  space = "Lab") +
+  labs(
+    title = "Top 15 IPA upstream regulators"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ IPA UR.png"), width = plot_width, height = plot_height)
+```
+
+## IPA CN
+IPA causal networks
+Standard GO term enrichment style plots
+```{r IPA CN}
+# Plot pathways, GO term style
+IPA_results$CN %>%
+  mutate(
+    Count = str_count(`Target molecules in dataset`, ",") + 1,
+    `p-value` = `Network bias-corrected p-value`,
+    `Master Regulator` = as.factor(str_trunc(`Master Regulator`, 30))
+  ) %>% # Add useful columns
+  arrange(`p-value`) %>% # Sort by p-value
+  .[1:15, ] %>% # Select the top 15
+  ggplot(aes(x = `Predicted Activation State`, y = `Master Regulator`, size = Count, col = `Activation z-score`)) +
+  geom_point() +
+  scale_color_gradient2(
+  midpoint = 0,
+  low = "blue",
+  mid = "white",
+  high = "red",
+  space = "Lab") +
+  labs(
+    title = "Top 15 IPA causal networks"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ IPA CN.png"), width = plot_width, height = plot_height)
+```
+
+## IPA D
+IPA diseases and bio functions
+Standard GO term enrichment style plots
+```{r IPA D}
+# Plot pathways, GO term style
+IPA_results$D %>%
+  mutate(
+    Count = `# Molecules`,
+    `p-value` = `p-Value`,
+    `Diseases or Functions Annotation` = as.factor(str_trunc(`Diseases or Functions Annotation`, 30))
+  ) %>% # Add useful columns
+  arrange(`p-value`) %>% # Sort by p-value
+  .[1:15, ] %>% # Select the top 15
+  ggplot(aes(x = `Predicted Activation State`, y = `Diseases or Functions Annotation`, size = `# Molecules`, col = `Bias-corrected z-score`)) +
+  geom_point() +
+  scale_color_gradient2(
+  midpoint = 0,
+  low = "blue",
+  mid = "white",
+  high = "red",
+  space = "Lab") +
+  labs(
+    title = "Top 15 IPA diseases and bio functions"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ IPA D.png"), width = plot_width, height = plot_height)
+```
+
+## IPA TF
+IPA tox functions
+Standard GO term enrichment style plots
+```{r IPA TF}
+# Plot pathways, GO term style
+IPA_results$TF %>%
+  mutate(
+    Count = `# Molecules`,
+    `p-value` = `p-Value`,
+    `Diseases or Functions Annotation` = as.factor(str_trunc(`Diseases or Functions Annotation`, 30))
+  ) %>% # Add useful columns
+  arrange(`p-value`) %>% # Sort by p-value
+  .[1:15, ] %>% # Select the top 15
+  ggplot(aes(x = `Predicted Activation State`, y = `Diseases or Functions Annotation`, size = `# Molecules`, col = `Bias-corrected z-score`)) +
+  geom_point() +
+  scale_color_gradient2(
+  midpoint = 0,
+  low = "blue",
+  mid = "white",
+  high = "red",
+  space = "Lab") +
+  labs(
+    title = "Top 15 IPA tox functions"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ IPA TF.png"), width = plot_width, height = plot_height)
+```
+
+## IPA RE
+IPA regulator effects
+Standard GO term enrichment style plots
+```{r IPA RE}
+# Plot pathways, GO term style
+IPA_results$RE %>%
+  mutate(
+    Count = str_count(`Target Molecules in Dataset`, ",") + 1,
+    `Regulators` = as.factor(str_trunc(`Regulators`, 30))
+  ) %>% # Add useful columns
+  ggplot(aes(x = `Consistency Score`, y = `Regulators`, size = Count)) +
+  geom_point() +
+  labs(
+    title = "Top 15 IPA regulator effects"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ IPA RE.png"), width = plot_width, height = plot_height)
+```
+
+## IPA ITL
+IPA ingenuity toxicity lists
+Standard GO term enrichment style plots
+```{r IPA ITL}
+# Plot pathways, GO term style
+IPA_results$ITL %>%
+  mutate(
+    `p-value` = 10 ^ -`-log(p-value)`,
+    Count = str_count(`...4`, ",") + 1,
+    `Ingenuity Toxicity Lists` = as.factor(str_trunc(`Ingenuity Toxicity Lists`, 30))
+  ) %>% # Add useful columns
+  filter(`p-value` < 0.05) %>% # Only select significant results
+  ggplot(aes(x = Molecules, y = `Ingenuity Toxicity Lists`, size = Count)) +
+  geom_point() +
+  labs(
+    title = "Top 15 IPA regulator effects"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "LFQ IPA ITL.png"), width = plot_width, height = plot_height)
+```
+
+
+## Network analysis
+Use the RCy3 package to connect to Cytoscape and make some networks.
+To run this code, Cytoscape must be installed an running before running this code. Two extensions for Cytoscape will also have to be installed, "stringApp" and "clusterMaker2"
+```{r Cytoscape plots}
+# Check connection to cytoscape
+cytoscapePing()
+
+# Run string analysis using command line in Cytoscape - p53 manually added
+commandsRun(
+  paste0(
+    'string protein query query="',
+    paste(c(Dif_prots, "P04637"), collapse=","),
+    '" species="Homo sapiens" cutoff=0.9')
+)
+
+# Get network name to reselect it later
+network_name <- getNetworkName()
+
+# Get clusters
+clustermaker2 <- commandsRun(paste0('cluster mcl network="', network_name, '"'))
+
+# Get cluster information
+clusters <- getTableColumns(table = "node", columns = c("name", "__mclCluster")) %>%
+  group_by(`__mclCluster`) %>%
+  summarise("Cluster_size" = n(), .groups = "drop") %>%
+  filter(!is.na(`__mclCluster`)) %>%
+  arrange(desc(Cluster_size))
+
+# Count numbers of clusters with only two nodes
+sum(clusters$Cluster_size == 2)
+
+# Get node table with cluster assignments
+node_table <- getTableColumns(table = "node")
+
+# Merge fold-change data with node table
+fc_tab <- node_table %>%
+  left_join(mutate(results, "query term" = Protein_first), by = "query term") %>%
+  group_by(name) %>%
+  summarise(log2FC = mean(log2FC), .groups = "drop")
+
+# Change Inf and -Inf values to maximum values
+inf_min <- min(fc_tab$log2FC[is.finite(fc_tab$log2FC)])
+inf_max <- max(fc_tab$log2FC[is.finite(fc_tab$log2FC)])
+fc_tab$log2FC[fc_tab$log2FC == -Inf] <- inf_min
+fc_tab$log2FC[fc_tab$log2FC == Inf] <- inf_max
+
+# Add fold-change column
+loadTableData(
+  fc_tab,
+  table = "node",
+  data.key.column = "name",
+  table.key.column = "name",
+  network = network_name)
+
+# Create a continuous color mapping for log2FC
+# Red for upregulated, blue for downregulated
+fc_range <- range(fc_tab$log2FC, na.rm = TRUE)
+
+setNodeColorMapping(
+  table.column = "log2FC",
+  table.column.values = c(min(fc_range), 0, max(fc_range)),
+  colors = c("#0000FF", "#FFFFFF", "#FF0000"),
+  mapping.type = "continuous",
+  style.name = "default",
+  network = network_name
+)
+
+# Set names to gene symbols
+setNodeLabelMapping(
+  table.column = "display name",
+  style.name = "default",
+  network = network_name
+)
+
+# Apply colouring style
+commandsRun('vizmap apply styles="default"')
+
+# Create subnetworks for top five clusters
+for (i in 1:5) {
+  cluster_id <- clusters$`__mclCluster`[i]
+  
+  # Set the network
+  setCurrentNetwork(network_name)
+  
+  # Clear selection
+  clearSelection(type = "both", network = network_name)
+  
+  # Select nodes
+  nodes_in_cluster <- node_table$name[node_table$`__mclCluster` == cluster_id]
+  selectNodes(nodes_in_cluster, by.col = "name")
+  
+  # Create subnetwork
+  commandsRun(paste0('network create nodeList="selected" source="', network_name, '" networkName="Cluster_', 
+                     i, '"'))
+  
+  layoutNetwork("force-directed")
+  Sys.sleep(3) 
+  
+  # Export subnetwork
+  fitContent()
+  Sys.sleep(5)
+  
+  exportImage(
+    filename = file.path(output_dir, paste0("Cluster ", i, " network.png")),
+    type = "PNG",
+    resolution = 300,
+    zoom = 200
+  )
+  
+  # Wait for processes to complete
+  Sys.sleep(5)
+}
+
+# Export cluster data and node table to upload to Jennifer for enrichment analysis
+save(clusters, file = paste0(output_dir, "clusters.rda"))
+save(node_table, file = paste0(output_dir, "node_table.rda"))
+
+# Run enrichment analysis to label clusters
+for(i in 1:5) {
+    cluster_id <- clusters$`__mclCluster`[i]
+    
+    cluster_DEGs <- node_table %>%
+        filter(`__mclCluster` == cluster_id) %>%
+        merge(
+            gene_map,
+            by.x = "query term",
+            by.y = "uniprotswissprot",
+            all.x = TRUE) %>%
+        .$ensembl_gene_id %>%
+        na.omit() %>%
+        unique()
+    
+    evoGO_res <- calcGOenrichment(
+        goAnnotation = GO_annotation,
+        deGenes = cluster_DEGs,
+        universe = reference_set,
+        domain = "BP",
+        minGenes = 5,
+        k = 1)
+    
+    # Print top three most significant pathways
+    print(paste("Cluster", i, "top three BPs:"))
+    print(evoGO_res %>%
+        arrange(evogo.pvalue) %>%
+        .$name %>%
+        .[1:3])
+}
+
+# Export table of nodes for supplementary data
+node_table %>%
+  filter(!is.na(`__mclCluster`)) %>%
+  lapply(as.character) %>%
+  write.csv(paste0(output_dir, "LFQ_STRING_clusters.csv"))
+```

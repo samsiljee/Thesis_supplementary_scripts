@@ -1,0 +1,1545 @@
+---
+title: "Phosphoproteomics results plotting"
+author: "Sam Siljee"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages
+library(dplyr) # Data wrangling
+library(tidyr) # For `pivot_longer` in labelling efficiency graph, and separate modifications
+library(stringr) # For editing strings in annotations files and PTMsigDB
+library(forcats) # Reorder factor in kinase inference plot
+library(readxl) # Read in IPA results
+library(ggplot2) # Plotting
+library(ggpubr) # Regression line for kinase z-score
+library(ggVennDiagram) # Protein overlap Venn diagram
+library(ComplexHeatmap) # Making the heatmaps
+library(RCy3) # Make network plots
+library(pathview) # Pathview plots
+library(evoGO) # Got term enrichment, note package is from github pak::pak("Evotec-Bioinformatics/evoGO")
+library(fgsea) # GSEA analysis
+library(msigdbr) # GSEA gene sets
+library(UniProt.ws) # Download UniProt data
+library(benchmarKIN) # Kinase inference analysis, note package is from github remotes::install_github("saezlab/benchmarKIN")
+library(org.Hs.eg.db) # Mapping for kinase pathview plot
+library(gson) # read.gmt function
+
+# User variables
+log_2_FC_cutoff <- log2(1.3)
+adj_p_value_cutoff <- 0.05
+input_dir <- paste0(getwd(), "/data/Phos/")
+output_dir <- paste0(getwd(), "/../produced_plots/MS_results/Phos/")
+
+# Files to load
+processed_file_protein <- "PTM_processed.rda"
+processed_file_phosphosite <- "PTM_processed_filtered.rda"
+results_file_protein <- "MSstatsPTM_results.rda"
+results_file_phosphosite <- "MSstatsPTM_results_filtered.rda"
+results_file_raw <- "MSstatsPTM_raw_results_filtered.rda"
+sites_of_interest_file <- "Phosphosites_of_interest.txt"
+IPA_file <- "Phos_summary_processed.xls"
+annotations_file <- "annotations.tsv"
+FASTA_file <- "Human_swissprot_no_iso_20250915.fasta"
+contaminants_FASTA_file <- "0602_Cell_Culture_Contaminants_GFP_to_eGFP_edit.fasta"
+UP_mods_file <- "UniProt_mods.tsv"
+kinase_file <- "RoKAI_kinase_table.csv"
+SIGNOR_file <- "PhosphoSIGNOR_KinaseData.tsv"
+TMT_results_file <- "TMT_differential_abundances.csv"
+PTMsigDB_file <- "ptm.sig.db.all.uniprot.human.v2.0.0.gmt"
+plot_width <- 8
+plot_height <- 5.5
+
+# Get the number of available cores, reserve 20% for other tasks
+available_cores <- floor(0.8 * parallel::detectCores())
+# Set GO term domains to use
+GO_domains <- c("BP", "CC", "MF")
+```
+
+## Load reference datasets
+Load reference data sets
+```{r Reference data sets}
+# Load custom functions
+source(paste0(input_dir, "../../../Functions.R"))
+
+# Get vector of all Uniprot IDs
+uniprot_ids <- c(
+  read_FASTA_names(paste0(input_dir, FASTA_file)),
+  read_FASTA_names(paste0(input_dir, contaminants_FASTA_file))
+) %>% unique()
+
+# Contaminant species vector
+cont_species <- readLines(paste0(input_dir, contaminants_FASTA_file)) %>%
+  grep(pattern = ">", value = TRUE) %>% # Extract only lines with info
+  str_match(pattern = "OS=(.*?)\\s*OX=") %>% # Extract just the species
+  .[, 2]
+
+# Get list of contaminant IDs, filtering out human proteins
+cont_ids <- read_FASTA_names(paste0(input_dir, contaminants_FASTA_file))[cont_species != "Homo sapiens"]
+
+# Get list of known phosphosites from UniProt
+if(file.exists(paste0(input_dir, UP_mods_file))) { # Load from local file
+  UniProt_mods <- read.delim(paste0(input_dir, UP_mods_file), sep = "\t")
+} else { # Load from UniProt web server
+  up <- UniProt.ws(taxId = 9606)
+  
+  # Query UniProt to get modification data
+  UniProt_mods <- select(
+    up, 
+    keys = str_remove(uniprot_ids, "Cont_"),
+    columns = c("accession",
+                "ft_mod_res",
+                "organism_id"),
+    keytype = "UniProtKB")
+  
+  # Process modifications column to get formatted phosphosites
+  UniProt_mods <- UniProt_mods %>%
+    filter(Organism..ID. == "9606") %>% # Remove non-human results
+    mutate(Phosphosite = sapply(Modified.residue, parse_phosphosites)) %>% # Process phosphosite data
+    separate_rows(Phosphosite) %>% # Split the phosphosites column into unique rows
+    filter(!is.na(Phosphosite)) %>% # Remove entries without phosphosites
+    unique() # Remove duplicates
+  
+  # Write to table
+  write.table(UniProt_mods, file = paste0(input_dir, "UniProt_mods.tsv"), sep = "\t", row.names = FALSE)
+}
+
+# Get GO term annotations
+if(file.exists(paste0(input_dir, "evogo__go20251010__ensembl115__specieshsapiens.rds"))) { # Load downloaded GO annotations
+  GO_annotation <- loadGOAnnotation(
+    species = "hsapiens",
+    goRelease = "2025-10-10",
+    ensemblRelease = 115,
+    path = input_dir
+  )
+} else { # Get GO annotations
+  GO_annotation <- getGOAnnotation(
+    species = "hsapiens",
+    goRelease = "2025-10-10",
+    ensemblRelease = 115,
+    nCores = available_cores,
+    save = TRUE,
+    path = input_dir
+  )
+}
+
+# Get gene sets for GSEA, use all pathways
+gene_sets_df <- msigdbr(db_species = "HS", species = "Homo sapiens")
+
+# Convert to named list format required by fgsea
+gene_sets <- gene_sets_df %>%
+  split(x = .$ensembl_gene, f = .$gs_name)
+
+# PTMsigDB dataset
+PTMsigDB <- read.gmt(paste0(input_dir, PTMsigDB_file)) %>%
+  mutate(gene = str_remove(gene, "-[^-]*$")) %>% # Strip up-down directionality suffix
+  mutate(gene = str_replace(gene, ";", "_")) # Format to be consistent with other data
+
+# SIGNOR dataset
+SIGNOR <- read.table(paste0(input_dir, SIGNOR_file), sep = "\t", header = TRUE)
+```
+
+## Load proteomics data
+Load data from my results
+```{r load data, include = FALSE}
+# Loading the results
+load(paste0(input_dir, results_file_protein))
+load(paste0(input_dir, results_file_phosphosite))
+load(paste0(input_dir, results_file_raw))
+
+# Process results, filter etc - protein level data (unfiltered)
+results_protein <- as.data.frame(MSstatsPTM_results) %>%
+  filter(Label == "P53 KD vs control") %>% # Only keep one comparison
+  filter(!GlobalProtein %in% cont_ids) %>% # Remove contaminants
+  mutate(
+    Protein = str_remove(Protein, "Cont_"),
+    GlobalProtein = str_remove(GlobalProtein, "Cont_"), Dif = NA) %>% # Remove "Cont_" tag from remaining human contaminants, and reset Dif column - not properly calculated in the MSstats workflow
+  group_by(GlobalProtein) %>%
+  slice_min(adj.pvalue, n = 1) %>% # Summarise multiple phosphosites per protein by taking teh most significant phosphosite
+  ungroup()
+
+# Process results, filter etc - phosphosite level data (filtered)
+results_phosphosite <- as.data.frame(MSstatsPTM_results_filtered) %>%
+  filter(Label == "P53 KD vs control") %>% # Only keep one comparison
+  filter(!GlobalProtein %in% cont_ids) %>% # Remove contaminants
+  mutate(
+    Protein = str_remove(Protein, "Cont_"),
+    GlobalProtein = str_remove(GlobalProtein, "Cont_"), Dif = NA) # Remove "Cont_" tag from remaining human contaminants, and reset Dif column - not properly calculated in the MSstats workflow
+
+# Add column for up/downregulated or non-significant
+results_protein$Dif <- ifelse(
+  results_protein$log2FC > log_2_FC_cutoff & results_protein$adj.pvalue < adj_p_value_cutoff,
+  "Upregulated",
+  ifelse(
+    results_protein$log2FC < -log_2_FC_cutoff & results_protein$adj.pvalue < adj_p_value_cutoff,
+    "Downregulated",
+    "Not significant"
+  )
+)
+results_phosphosite$Dif <- ifelse(
+  results_phosphosite$log2FC > log_2_FC_cutoff & results_phosphosite$adj.pvalue < adj_p_value_cutoff,
+  "Upregulated",
+  ifelse(
+    results_phosphosite$log2FC < -log_2_FC_cutoff & results_phosphosite$adj.pvalue < adj_p_value_cutoff,
+    "Downregulated",
+    "Not significant"
+  )
+)
+
+# Add list of entrez IDs to results data
+results_protein <- merge(
+  mutate(results_protein, Protein_first = sub(";.*", "", GlobalProtein)),
+  gene_map,
+  by.x = "Protein_first",
+  by.y = "uniprotswissprot",
+  all.x = TRUE
+)
+
+# Load IPA results
+sheet_names <- excel_sheets(paste0(input_dir, IPA_file)) # Get sheet names
+IPA_results <- lapply(sheet_names, function(x) { # Read all sheets to list
+  as.data.frame(read_excel(paste0(input_dir, IPA_file), sheet = x))
+})
+names(IPA_results) <- sheet_names # Rename list elements
+
+# Load processed protein lists
+load(paste0(input_dir, processed_file_protein))
+load(paste0(input_dir, processed_file_phosphosite))
+
+# Load annotations for matrixes
+annotations <- read.delim(paste0(input_dir, annotations_file), header = TRUE) %>%
+  # Add sample column to use as labels
+  mutate(Sample = paste(BioReplicate, Condition, sep = "_")) %>%
+  group_by(Sample) %>%
+  mutate(Sample = paste0(Sample, "_", row_number())) %>%
+  ungroup() %>%
+  mutate(
+    across(
+      c(
+        Condition,
+        BioReplicate,
+        Run,
+        Sex,
+        Smoker,
+        Sample
+      ),
+      as.factor
+    )
+  )
+
+# Phosphosite level matrix for TMT data
+phos_mat <- ({
+  df <- MSstatsPTM_processed_filtered$PTM$ProteinLevelData %>%
+    filter(BioReplicate != "Norm") %>%
+    mutate(
+      Sample = paste(BioReplicate, str_split_i(Condition, "_", i = 1), TechRepMixture, sep = "_")
+    ) %>%
+    dplyr::select(Protein, Sample, Abundance) %>%
+    pivot_wider(names_from = Sample, values_from = Abundance)
+
+  df_mat <- as.matrix(df[, -1])
+
+  row.names(df_mat) <- df$Protein
+
+  df_mat
+})
+
+# Phosphosite matrix by donor rather than technical replicate
+donor_phos_mat <- ({
+  df <- MSstatsPTM_processed_filtered$PTM$ProteinLevelData %>%
+    filter(BioReplicate != "Norm") %>%
+    mutate(
+      Sample = paste(BioReplicate, str_split_i(Condition, "_", i = 1), sep = "_")
+    ) %>%
+    group_by(Sample, Protein) %>%
+    summarise(Abundance = mean(Abundance, na.rm = TRUE)) %>%
+    dplyr::select(Protein, Sample, Abundance) %>%
+    pivot_wider(names_from = Sample, values_from = Abundance)
+
+  df_mat <- as.matrix(df[, -1])
+
+  row.names(df_mat) <- df$Protein
+
+  df_mat
+})
+
+# Load results from RokaiXplorer
+kinase_res <- read.csv(paste0(input_dir, kinase_file))
+
+# Load TMT fold-changes
+TMT_res <- read.csv(paste0(input_dir, TMT_results_file))
+
+# Load phosphosites of interest
+sites_of_interest <- readLines(paste0(input_dir, sites_of_interest_file))
+```
+
+## Quant numbers
+Note that in the text I use numbers including the potential contaminants
+```{r}
+print("Quantified proteins:")
+length(unique(results_protein$GlobalProtein))
+print("Quantified phosphosites:")
+length(unique(results_phosphosite$Protein))
+print("Upregulated phosphosites:")
+sum(all_results_phosphosite$Dif == "Upregulated", na.rm = TRUE)
+print("Downregulated phosphosites:")
+sum(all_results_phosphosite$Dif == "Downregulated", na.rm = TRUE)
+
+# Save table of top 15 most significant phosphosites
+merge(
+  mutate(
+    results_phosphosite,
+    Protein_first = sub(";.*", "", GlobalProtein),
+    Phosphosite = str_split_i(Protein, "_", i = 2)),
+  gene_map,
+  by.x = "Protein_first",
+  by.y = "uniprotswissprot",
+  all.x = TRUE
+) %>%
+  filter(!is.na(pvalue) & Protein_first != "missing") %>%
+  arrange(adj.pvalue) %>%
+  .[1:15,] %>%
+  dplyr::select(
+  "Protein_first",
+  "hgnc_symbol",
+  "Phosphosite",
+  "log2FC",
+  "adj.pvalue") %>%
+  write.csv(paste0(output_dir, "top_dif_phosphosites.csv"), row.names = FALSE)
+
+# Save table of top 15 phosphosites of interest
+merge(
+  mutate(
+    results_phosphosite,
+    Protein_first = sub(";.*", "", GlobalProtein),
+    Phosphosite = str_split_i(Protein, "_", i = 2)),
+  gene_map,
+  by.x = "Protein_first",
+  by.y = "uniprotswissprot",
+  all.x = TRUE
+) %>%
+  filter(Protein %in% sites_of_interest) %>%
+  dplyr::select(
+  "Protein_first",
+  "hgnc_symbol",
+  "Phosphosite",
+  "log2FC",
+  "adj.pvalue") %>%
+  write.csv(paste0(output_dir, "phosphosites_of_interest.csv"), row.names = FALSE)
+
+# save the formatted protein level differential abundances
+write.csv(results_protein, file = paste(output_dir, "Protein_level_differential_abundances.csv", sep = ""))
+# save the formatted phosphosite level differential abundances
+write.csv(results_phosphosite, file = paste(output_dir, "Phosphosite_level_differential_abundances.csv", sep = ""))
+# .csv of protein level abundances
+write.csv(MSstatsPTM_processed$PTM$ProteinLevelData, paste0(output_dir, "Protein_level_abundances.csv"))
+# .csv of phosphosite level abundances
+write.csv(MSstatsPTM_processed_filtered$PTM$ProteinLevelData, paste0(output_dir, "Phosphosite_level_abundances.csv"))
+```
+
+## Volcano plot
+```{r Volcano plot, include = FALSE}
+# Set colours as a named vector
+colours <- c("red", "blue", "black")
+names(colours) <- c("Upregulated", "Downregulated", "Not significant")
+
+# Make the plot
+results_phosphosite %>%
+  ggplot(aes(x = log2FC, y = -log10(adj.pvalue), col = Dif)) +
+  geom_vline(xintercept = c(-log_2_FC_cutoff, log_2_FC_cutoff), linetype = "dashed", colour = "black") +
+  geom_hline(yintercept = -log10(adj_p_value_cutoff), linetype = "dashed", colour = "red") +
+  geom_point(alpha = 0.25, show.legend = FALSE) +
+  scale_color_manual(values = colours) +
+  labs(
+    x = "Log 2 fold-change",
+    y = "-Log10(adjusted p-value)",
+    title = "Volcano plot - Phosphosites"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phosphosite volcano plot.png"), width = plot_width, height = plot_height)
+
+# Make the plot
+results_protein %>%
+  ggplot(aes(x = log2FC, y = -log10(adj.pvalue), col = Dif)) +
+  geom_vline(xintercept = c(-log_2_FC_cutoff, log_2_FC_cutoff), linetype = "dashed", colour = "black") +
+  geom_hline(yintercept = -log10(adj_p_value_cutoff), linetype = "dashed", colour = "red") +
+  geom_point(alpha = 0.25, show.legend = FALSE) +
+  scale_color_manual(values = colours) +
+  labs(
+    x = "Log 2 fold-change",
+    y = "-Log10(adjusted p-value)",
+    title = "Volcano plot - Phosphoproteins"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phosphoprotein volcano plot.png"), width = plot_width, height = plot_height)
+```
+
+## Phosphosite ID venn
+Query Uniprot to get numbers of know phosphorylation sites. Also use this to make some reference sets.
+```{r}
+print("Number of UniProt phosphosites:")
+print(nrow(UniProt_mods))
+print("Number of unique UniProt modified proteins:")
+print(length(unique(UniProt_mods$Entry)))
+
+# Make a list of proteins identified in TMT for Venn diagram
+TMT_IDs <- unique(MSstatsPTM_processed$PROTEIN$ProteinLevelData$Protein)
+
+# Remove contaminants and take first ID
+TMT_IDs <- sub(
+  pattern = ";.*",
+  replacement = "",
+  x = TMT_IDs[!grepl(TMT_IDs, pattern = "Cont_")]
+) %>%
+  unique()
+
+# Make input for Venn
+venn_list <- list(
+  UniProt = unique(UniProt_mods$Entry),
+  PTMsigDB = unique(str_split_i(PTMsigDB$gene, "_", i = 1)),
+  "Phosphoproteomics data" = unique(results_protein$Protein_first),
+  "TMT data" = TMT_IDs
+)
+
+# make the plot
+ggVennDiagram(venn_list) +
+  theme_void() +
+  ggtitle("Protein dataset overlap") +
+  ggplot2::scale_fill_gradient(low = "white", high = "red")
+
+# Save the plot
+ggsave(paste0(output_dir, "protein dataset venn diagram.png"), width = plot_width, height = plot_height)
+```
+
+## PCA analysis
+PCA analysis and plots, along with eigen value plots
+```{r PCA}
+# Run PCA analysis on phosphosite-level data
+# Run PCA analysis
+Phos_PCA <- prcomp(t(na.omit(phos_mat)), center = TRUE, scale. = TRUE)
+
+PCA_data <- as.data.frame(Phos_PCA$x) %>%
+  mutate(
+    Sample = rownames(Phos_PCA$x),
+    BioReplicate = str_split_i(Sample, "_", i = 1),
+    Condition = str_split_i(Sample, "_", i = 2),
+    Sample = paste(BioReplicate, Condition, sep = "_")
+  ) %>%
+  merge(
+    unique(
+      dplyr::select(
+        mutate(
+          filter(annotations, BioReplicate != "Norm"),
+          Sample = paste(BioReplicate, Condition, sep = "_")
+        ),
+        c(Sample, Smoker, Sex)
+      )
+    ),
+    by = "Sample"
+  )
+
+# PCA plot PC1 vs PC2
+PCA_data %>%
+  ggplot(aes(x = PC1, y = PC2, colour = Condition, shape = BioReplicate)) +
+  geom_point() +
+  scale_shape_manual(values = 1:8) +
+  stat_ellipse(aes(group = Condition)) +
+  labs(
+    x = paste0(
+      "PC1 (",
+      round(summary(Phos_PCA)$importance[2, 1] * 100, digits = 1),
+      "%)"
+    ),
+    y = paste0(
+      "PC2 (",
+      round(summary(Phos_PCA)$importance[2, 2] * 100, digits = 1),
+      "%)"
+    ),
+    title = "PCA plot - Phosphosite data",
+    color = "Condition",
+    shape = "Donor"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phos PCA plot.png"), width = plot_width, height = plot_height)
+
+# Eigen value plot = first 15 values
+data.frame(
+  Proportion = summary(Phos_PCA)$importance[2, 1:15],
+  PC = 1:15
+) %>%
+  ggplot(aes(x = PC, y = Proportion)) +
+  geom_col(stat = "identity") +
+  labs(
+    x = "Principle component",
+    y = "Proportion",
+    title = "Eigenvalue plot - top 15 principle components"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phos eigenvalue plot.png"), width = plot_width, height = plot_height)
+```
+
+## Heatmaps
+Add in a heatmap of Phos data combined to check how they cluster together. Do the same for PCA plot perhaps?
+```{r Heatmaps, include = FALSE}
+# List differentially abundant phosphosites for heatmap filtering
+Dif_phos <- results_phosphosite %>%
+  filter(Dif == "Upregulated" | Dif == "Downregulated") %>%
+  .$Protein %>%
+  unique() %>%
+  na.omit()
+
+# Phos unfiltered heatmap - including NA's
+make_custom_heatmap(
+  input_matrix = phos_mat,
+  include_NAs = TRUE,
+  condition_annotations = str_split_i(colnames(phos_mat), "_", 2),
+  donor_annotations = str_split_i(colnames(phos_mat), "_", 1),
+  na_col = "gray",
+  annot_col = custom_colours,
+  column_title = "Phosphosite heatmap",
+  output_dir = output_dir,
+  file_name = "Phos_heatmap_all_missing_values.png"
+)
+
+# Phos filtered heatmap - by donor
+make_custom_heatmap(
+  input_matrix = donor_phos_mat,
+  include_NAs = FALSE,
+  filter_list = Dif_phos,
+  condition_annotations = str_split_i(colnames(donor_phos_mat), "_", 2),
+  donor_annotations = str_split_i(colnames(donor_phos_mat), "_", 1),
+  annot_col = custom_colours,
+  column_title = "Phosphoproteomics donors - differential phosphosites",
+  output_dir = output_dir,
+  file_name = "Phos_heatmap_filtered_by_donor.png"
+)
+```
+
+## GO term enrichment
+Use evoGO to remove redundant terms, alternatively topGO could be used.
+```{r evoGO}
+# List of differentially expressed genes for enrichment analysis
+DEGs_protein <- results_protein %>%
+  filter(Dif == "Upregulated" | Dif == "Downregulated") %>%
+  .$ensembl_gene_id %>%
+  unique() %>%
+  na.omit()
+
+# Reference set - all quantified gene names
+reference_set_protein <- unique(results_protein$ensembl_gene_id)
+
+# Initialise list for GO term enrichment results
+evoGO_results <- list()
+
+# Perform GO enrichment analysis - loop through domains
+for (d in GO_domains) {
+  evoGO_results[[d]] <- calcGOenrichment(
+    goAnnotation = GO_annotation,
+    deGenes = DEGs_protein,
+    universe = reference_set_protein,
+    domain = d,
+    minGenes = 5,
+    k = 1,
+    nCores = available_cores
+  )
+}
+
+# Summarise the numbers
+evoGO_summary <- data.frame()
+
+for (d in GO_domains) {
+  evoGO_summary <- bind_rows(
+    evoGO_summary,
+    data.frame(
+      Domain = d,
+      Total_IDs = nrow(evoGO_results[[d]]),
+      Sig_IDs = sum(evoGO_results[[d]]$fisher.pvalue < adj_p_value_cutoff),
+      Reduntant_IDs = sum(evoGO_results[[d]]$fisher.pvalue < adj_p_value_cutoff) - sum(evoGO_results[[d]]$evogo.pvalue < adj_p_value_cutoff)
+    )
+  )
+}
+
+evoGO_summary
+
+# Make plots for each domain
+for (d in c("BP", "MF")) {
+  evoGO_results[[d]] %>%
+    mutate(
+      Ratio = significant / annotated
+    ) %>% # Add useful columns
+    arrange(evogo.pvalue) %>% # Sort by p-value - evoGO algorythm
+    .[1:15, ] %>% # Select the top 15
+    mutate(name = as.factor(str_trunc(name, 40))) %>%
+    ggplot(aes(x = Ratio, y = name, size = annotated, colour = evogo.pvalue)) +
+    geom_point() +
+    labs(
+      title = paste0("Top 15 enriched GO terms - ", d),
+      x = "Ratio",
+      y = "GO term",
+      colour = "evoGO algorithm p-value",
+      size = "Gene count"
+    ) +
+    theme_bw()
+
+  # Save the plot
+  ggsave(paste0(output_dir, d, " GO term plot.png"), width = plot_width, height = plot_height)
+}
+
+# Manually export all 12 significant CC terms
+evoGO_results[["CC"]] %>%
+  mutate(
+    Ratio = significant / annotated
+  ) %>%
+  filter(evogo.pvalue < 0.05) %>%
+  mutate(name = as.factor(str_trunc(name, 40))) %>%
+  ggplot(aes(x = Ratio, y = name, size = annotated, colour = evogo.pvalue)) +
+  geom_point() +
+  labs(
+    title = paste0("Top 15 enriched GO terms - CC"),
+    x = "Ratio",
+    y = "GO term",
+    colour = "evoGO algorithm p-value",
+    size = "Gene count"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "CC GO term plot.png"), width = plot_width, height = plot_height)
+
+# Export table of all GO term results
+GO_results_tab <- data.frame()
+for(d in GO_domains){
+  GO_results_tab <- bind_rows(
+    GO_results_tab,
+    mutate(evoGO_results[[d]], domain = d)
+  )
+}
+write.csv(GO_results_tab, paste0(output_dir, "Phos_GO_term_results.csv"))
+
+# Check targets for potential discussion
+identify_enrichment_targets(
+  pathway_name = "epithelial to mesenchymal transition",
+  Dif_IDs = DEGs_protein
+)
+```
+
+## GSEA
+Gene set enrichment analysis. Using fgsea.
+Based on the method shown in this tutorial:
+https://biostatsquid.com/fgsea-tutorial-gsea/
+```{r}
+# Prepare list of ranked genes. Use sign from foldchange, and magnitude from p-value
+rankings_protein <- results_protein %>%
+  mutate(ranking = sign(log2FC) * -log10(pvalue)) %>%
+  filter(!is.na(ensembl_gene_id) & !is.na(ranking)) %>%
+  arrange(desc(ranking)) %>%
+  pull(ranking, name = ensembl_gene_id)
+
+# Run GSEA
+GSEA_res <- fgsea(
+  pathways = gene_sets,
+  stats = rankings_protein,
+  scoreType = "std",
+  minSize = 10,
+  maxSize = 500,
+  nPermSimple = 20000
+)
+
+# Print some numbers
+print("Total number of pathways:")
+nrow(GSEA_res)
+
+print("Total number of statistically significant pathways")
+sum(GSEA_res$padj < 0.05)
+
+print("Total number of statistically significant upregulated pathways")
+sum(GSEA_res$padj < 0.05 & GSEA_res$ES > 0)
+
+print("Total number of statistically significant downregulated pathways")
+sum(GSEA_res$padj < 0.05 & GSEA_res$ES < 0)
+
+print("Pathways excluded due to multiple hypothesis testing correction:")
+sum(GSEA_res$padj > 0.05 & GSEA_res$pval < 0.5)
+
+top_pathways <- GSEA_res[padj < 0.05, pathway]
+
+# Plot table of results
+plotGseaTable(
+  pathways = gene_sets[top_pathways],
+  stats = rankings_protein,
+  fgseaRes = GSEA_res,
+  gseaParam = 0.5
+)
+
+# Save the plot
+ggsave(paste0(output_dir, "GSEA tab.png"), width = plot_width, height = plot_height)
+
+# Plot the enriched pathways
+for (pathway in top_pathways) {
+  plotEnrichment(
+    gene_sets[[pathway]],
+    rankings_protein
+  ) +
+    labs(
+      title = str_replace_all(str_replace(str_to_upper(pathway), "Hallmark_", ""), "_", " "),
+      x = "Rank",
+      y = "Enrichment score (ES)"
+    ) +
+    theme_bw()
+
+  # Save the plot
+  ggsave(paste0(output_dir, "GSEA ", pathway, ".png"), width = plot_width, height = plot_height)
+}
+
+# Merge GSEA results with more details from the gene sets data table and save as a .csv
+gene_sets_df %>%
+  dplyr::select(-c(gene_symbol, ncbi_gene, ensembl_gene, db_gene_symbol, db_ncbi_gene, db_ensembl_gene, source_gene)) %>%
+  unique() %>%
+  right_join(GSEA_res, by = c("gs_name" = "pathway")) %>%
+  lapply(as.character) %>%
+write.csv(paste0(output_dir, "Phos_GSEA_results.csv"))
+```
+
+## Pathview plots
+Use the Identified KEGG pathways from GSEA for pathview analysis
+```{r Pathview plots, echo = FALSE, eval = FALSE}
+# Get list of significant KEGG pathways
+KEGG_pathways <- grep("KEGG", top_pathways, value = TRUE)
+
+# Count number of enriched pathways
+length(KEGG_pathways)
+
+# Manually look up pathways and get hsa codes
+hsa_pathways <- c(
+  "hsa03040"
+)
+
+# make plots for all pathways
+for(path in hsa_pathways) {
+  pathview(
+    gene.data = pull(results_protein, log2FC, name = ensembl_gene_id),
+    pathway.id = path,
+    species = "Homo sapiens",
+    gene.idtype = "ensembl",
+    kegg.native = TRUE
+  )
+}
+```
+
+# PTM-SEA
+Run PTM-SEA analysis - based on GSEA, but using PTMsigDB and phosphosite level data instead.
+```{r}
+# Get more consistent results
+set.seed(44)
+
+# Prepare list of ranked genes. Use sign from foldchange, and magnitude from p-value
+rankings_phosphosite <- results_phosphosite %>%
+  mutate(ranking = sign(log2FC) * -log10(pvalue)) %>%
+  filter(!is.na(Protein) & !is.na(ranking)) %>%
+  arrange(desc(ranking)) %>%
+  pull(ranking, name = Protein)
+
+# Convert to named list format required by fgsea
+PTM_gene_sets <- PTMsigDB %>%
+  mutate(term = as.character(term)) %>%
+  split(x = .$gene, f = .$term)
+
+# Run PTM-SEA
+PTM_SEA_res <- fgsea(
+  pathways = PTM_gene_sets,
+  stats = rankings_phosphosite,
+  scoreType = "std",
+  minSize = 10,
+  maxSize = 500,
+  nPermSimple = 20000
+)
+
+# Print some numbers
+print("Total number of pathways:")
+length(PTM_gene_sets)
+
+print("Total number of pathways identified:")
+nrow(PTM_SEA_res)
+
+print("Total number of statistically significant pathways")
+sum(PTM_SEA_res$padj < 0.05)
+
+print("Total number of statistically significant upregulated pathways")
+sum(PTM_SEA_res$padj < 0.05 & PTM_SEA_res$ES > 0)
+
+print("Total number of statistically significant downregulated pathways")
+sum(PTM_SEA_res$padj < 0.05 & PTM_SEA_res$ES < 0)
+
+print("Number of sets excluded due to multiple hypopthesis testing correction:")
+sum(PTM_SEA_res$padj > 0.05 & PTM_SEA_res$pval < 0.05)
+
+PTM_top_pathways <- PTM_SEA_res[padj < 0.05, pathway]
+
+# Plot table of results
+plotGseaTable(
+  pathways = PTM_gene_sets[PTM_top_pathways],
+  stats = rankings_phosphosite,
+  fgseaRes = PTM_SEA_res,
+  gseaParam = 0.5
+)
+
+# Save the plot
+ggsave(paste0(output_dir, "PTM GSEA tab.png"), width = plot_width, height = plot_height)
+
+# Plot the enriched pathways
+for (pathway in PTM_top_pathways) {
+  plotEnrichment(
+    PTM_gene_sets[[pathway]],
+    PTM_rankings
+  ) +
+    labs(
+      title = str_replace_all(str_replace(str_to_upper(pathway), "Hallmark_", ""), "_", " "),
+      x = "Rank",
+      y = "Enrichment score (ES)"
+    ) +
+    theme_bw()
+  
+  # Save the plot
+  ggsave(paste0(output_dir, "GSEA PTM ", pathway, ".png"), width = plot_width, height = plot_height)
+}
+
+# Save as a .csv
+PTM_SEA_res %>%
+  lapply(as.character) %>%
+write.csv(paste0(output_dir, "Phos_PTM-SEA_results.csv"))
+```
+
+# IPA
+## IPA hit summary
+Summary of number of hits in each category
+```{r}
+# Select results to summarise and relevant stat filtering
+results_to_analyse <- c("CP", "UR", "CN", "D", "TF", "RE", "N", "ITL")
+stats_to_analyse <- c("-log(p-value)", "p-value of overlap", "Network bias-corrected p-value", "p-Value", "p-Value", "Consistency Score", "Score", "-log(p-value)")
+
+# Initialise data frame
+IPA_summary <- data.frame()
+
+for (i in 1:length(results_to_analyse)) {
+  IPA_summary <- bind_rows(
+    IPA_summary,
+    data.frame(
+      Category = results_to_analyse[i],
+      Stat = stats_to_analyse[i],
+      "Identification number" = nrow(IPA_results[[results_to_analyse[i]]]),
+      "Significant number" = sum(IPA_results[[results_to_analyse[i]]][, stats_to_analyse[i]] < 0.05)
+    )
+  )
+}
+
+# Manually correct for p-values using -log
+IPA_summary[IPA_summary$Category == "CP", ]$Significant.number <- sum((10^-IPA_results[["CP"]]$`-log(p-value)`) < 0.05)
+IPA_summary[IPA_summary$Category == "ITL", ]$Significant.number <- sum((10^-IPA_results[["ITL"]]$`-log(p-value)`) < 0.05)
+
+# Save results
+write.csv(IPA_summary, paste0(output_dir, "IPA_summary.csv"), row.names = FALSE)
+```
+
+## IPA CP
+IPA Canonical Pathway
+Standard GO term enrichment style plots
+```{r IPA CN}
+# Plot pathways, GO term style
+IPA_results$CP %>%
+  mutate(
+    Count = str_count(Molecules, ",") + 1,
+    `p-value` = 10^-`-log(p-value)`,
+    `Ingenuity Canonical Pathways` = factor(`Ingenuity Canonical Pathways`,
+      levels = `Ingenuity Canonical Pathways`
+    )
+  ) %>% # Add useful columns
+  arrange(`p-value`) %>% # Sort by p-value
+  .[1:15, ] %>% # Select the top 15
+  ggplot(aes(x = Ratio, y = `Ingenuity Canonical Pathways`, size = Count, col = zScore)) +
+  geom_point() +
+  scale_color_gradient2(
+    midpoint = 0,
+    low = "blue",
+    mid = "white",
+    high = "red",
+    space = "Lab"
+  ) +
+  labs(
+    title = "Top 15 IPA canonical pathways"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phos IPA CP.png"), width = plot_width, height = plot_height)
+```
+
+## IPA UR
+IPA Upstream Regulators
+Standard GO term enrichment style plots
+```{r IPA UR}
+# Plot pathways, GO term style
+IPA_results$UR %>%
+  mutate(
+    Count = str_count(`Target molecules in dataset`, ",") + 1,
+    `p-value` = `p-value of overlap`,
+    `Upstream Regulator` = factor(`Upstream Regulator`,
+      levels = `Upstream Regulator`
+    )
+  ) %>% # Add useful columns
+  arrange(`p-value`) %>% # Sort by p-value
+  .[1:15, ] %>% # Select the top 15
+  ggplot(aes(x = `Predicted Activation State`, y = `Upstream Regulator`, size = Count, col = `Bias-corrected z-score`)) +
+  geom_point() +
+  scale_color_gradient2(
+    midpoint = 0,
+    low = "blue",
+    mid = "white",
+    high = "red",
+    space = "Lab"
+  ) +
+  labs(
+    title = "Top 15 IPA upstream regulators"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phos IPA UR.png"), width = plot_width, height = plot_height)
+```
+
+## IPA CN
+IPA causal networks
+Standard GO term enrichment style plots
+```{r IPA CN}
+# Plot pathways, GO term style
+IPA_results$CN %>%
+  mutate(
+    Count = str_count(`Target molecules in dataset`, ",") + 1,
+    `p-value` = `Network bias-corrected p-value`,
+    `Master Regulator` = as.factor(str_trunc(`Master Regulator`, 30))
+  ) %>% # Add useful columns
+  arrange(`p-value`) %>% # Sort by p-value
+  .[1:15, ] %>% # Select the top 15
+  ggplot(aes(x = `Predicted Activation State`, y = `Master Regulator`, size = Count, col = `Activation z-score`)) +
+  geom_point() +
+  scale_color_gradient2(
+    midpoint = 0,
+    low = "blue",
+    mid = "white",
+    high = "red",
+    space = "Lab"
+  ) +
+  labs(
+    title = "Top 15 IPA causal networks"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phos IPA CN.png"), width = plot_width, height = plot_height)
+```
+
+## IPA D
+IPA diseases and bio functions
+Standard GO term enrichment style plots
+```{r IPA D}
+# Plot pathways, GO term style
+IPA_results$D %>%
+  mutate(
+    Count = `# Molecules`,
+    `p-value` = `p-Value`,
+    `Diseases or Functions Annotation` = as.factor(str_trunc(`Diseases or Functions Annotation`, 30))
+  ) %>% # Add useful columns
+  arrange(`p-value`) %>% # Sort by p-value
+  .[1:15, ] %>% # Select the top 15
+  ggplot(aes(x = `Predicted Activation State`, y = `Diseases or Functions Annotation`, size = `# Molecules`, col = `Bias-corrected z-score`)) +
+  geom_point() +
+  scale_color_gradient2(
+    midpoint = 0,
+    low = "blue",
+    mid = "white",
+    high = "red",
+    space = "Lab"
+  ) +
+  labs(
+    title = "Top 15 IPA diseases and bio functions"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phos IPA D.png"), width = plot_width, height = plot_height)
+```
+
+## IPA TF
+IPA tox functions
+Standard GO term enrichment style plots
+```{r IPA TF}
+# Plot pathways, GO term style
+IPA_results$TF %>%
+  mutate(
+    Count = `# Molecules`,
+    `p-value` = `p-Value`,
+    `Diseases or Functions Annotation` = as.factor(str_trunc(`Diseases or Functions Annotation`, 30))
+  ) %>% # Add useful columns
+  filter(`p-value` < 0.05) %>% # Filter for significant TF
+  ggplot(aes(x = `Predicted Activation State`, y = `Diseases or Functions Annotation`, size = `# Molecules`, col = `Bias-corrected z-score`)) +
+  geom_point() +
+  scale_color_gradient2(
+    midpoint = 0,
+    low = "blue",
+    mid = "white",
+    high = "red",
+    space = "Lab"
+  ) +
+  labs(
+    title = "Significant IPA tox functions"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phos IPA TF.png"), width = plot_width, height = plot_height)
+```
+
+## IPA RE
+IPA regulator effects
+Standard GO term enrichment style plots
+```{r IPA RE}
+# Plot pathways, GO term style
+IPA_results$RE %>%
+  mutate(
+    Count = str_count(`Target Molecules in Dataset`, ",") + 1,
+    `Regulators` = as.factor(str_trunc(`Regulators`, 30))
+  ) %>% # Add useful columns
+  ggplot(aes(x = `Consistency Score`, y = `Regulators`, size = Count)) +
+  geom_point() +
+  labs(
+    title = "IPA regulator effects"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phos IPA RE.png"), width = plot_width, height = plot_height)
+```
+
+## IPA ITL
+IPA ingenuity toxicity lists
+Standard GO term enrichment style plots
+```{r IPA ITL}
+# Plot pathways, GO term style
+IPA_results$ITL %>%
+  mutate(
+    `p-value` = 10^-`-log(p-value)`,
+    Count = str_count(`...4`, ",") + 1,
+    `Ingenuity Toxicity Lists` = as.factor(str_trunc(`Ingenuity Toxicity Lists`, 30))
+  ) %>% # Add useful columns
+  filter(`p-value` < 0.05) %>% # Filter for significant ITL
+  ggplot(aes(x = Molecules, y = `Ingenuity Toxicity Lists`, size = Count)) +
+  geom_point() +
+  labs(
+    title = "Significant ingenuity toxicity lists"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phos IPA ITL.png"), width = plot_width, height = plot_height)
+```
+
+## benchmarKIN
+Infer the presence of kinases using the benchmarKIN package.
+I will use the perturbation-based method.
+Based on the paper by Müller-Dott et. al. 10.1038/s41467-025-59779-y
+Documentation here:
+https://benchmarkin.readthedocs.io/en/latest/index.html
+```{r Kinase inference benchmarKIN}
+# Run pertubation based testing
+# Format the curated list from Müller-Dott et. al.
+curated_lib <- curated %>%
+  mutate(
+    target = paste(target, target_protein, position, sep = "|")
+  ) %>%
+  dplyr::select(source, target, mor) %>%
+  dplyr::distinct()
+
+# Format input for RoKAI z-score calculation - combine corrected and uncorrected log2FCs
+zs_mat <- MSstatsPTM_raw_results_filtered %>%
+  filter(Label == "P53 KD vs control") %>%
+  filter(!str_split_i(Protein, "_", i = 1) %in% cont_ids) %>%
+  mutate(Raw = log2FC) %>%
+  full_join(
+    data.frame(
+      Protein = results_phosphosite$Protein,
+      Corrected = results_phosphosite$log2FC
+    ),
+    by = "Protein"
+  ) %>%
+  separate(
+    col = Protein,
+    into = c("Protein", "Phosphosite"),
+    sep = "_"
+  ) %>%
+  left_join(
+    gene_map,
+    by = c("Protein" = "uniprotswissprot")
+  ) %>%
+  filter(!is.na(hgnc_symbol)) %>%
+  group_by(hgnc_symbol, Phosphosite) %>%
+  summarise(
+    Raw = mean(Raw, na.rm = TRUE), 
+    Corrected = mean(Corrected, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  filter(hgnc_symbol != "") %>%
+  as.data.frame()
+
+rownames(zs_mat) <- paste(paste(zs_mat$hgnc_symbol, zs_mat$Phosphosite, sep = "_"), zs_mat$hgnc_symbol, zs_mat$Phosphosite, sep = "|")
+
+zs_mat <- zs_mat[, c("Raw", "Corrected")]
+
+# Run pertubation-based inference
+act_scores <- run_zscore(mat = zs_mat, network = curated_lib)
+
+# Get some numbers
+print("Number of kinases included in the network:")
+length(unique(curated_lib$source))
+print("Number of quantified kinases:")
+nrow(act_scores)
+
+# Add kinase column and reorder for plotting
+act_scores$Kinase <- factor(row.names(act_scores)) %>%
+  fct_reorder(act_scores$Raw, .desc = TRUE)
+
+# Make a plot
+act_scores %>%
+  arrange(desc(abs(Raw))) %>% # Select the top 30 kinases by absolute z-score
+  .[1:30,] %>%
+  ggplot(aes(x = Kinase, y = Raw, fill = Raw)) +
+  geom_col() +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+  ) +
+  labs(
+    title = "Top 30 altered kinases",
+    x = "Kinase",
+    y = "benchmarKIN z-score",
+    fill = "z-score"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+# Save the plot
+ggsave(paste0(output_dir, "BenchmarKIN kinase plot.png"), width = plot_width, height = plot_height)
+
+# Save all the scores as a .csv file
+act_scores %>%
+write.csv(paste0(output_dir, "Phos_benchmarKIN_results.csv"), row.names = FALSE)
+```
+
+## RoKAI
+Kinase inference using the original RoKAI method. Originally implemented in MATLAB, however web version available here:
+https://rokai.io/
+There is a newer version (the one I used) available here:
+https://rokai.io/explorer/
+Code to format data for RoKAI input, and make plots from output.
+Original paper: 10.1038/s41467-021-21211-6
+For the RokaiXplorer analysis, the configuration is available in the inputs folder
+```{r Kinase activity inference - RoKAI}
+# Format the data for the online RoKAI tool input - simple method
+MSstatsPTM_raw_results_filtered %>%
+  separate(
+    col = Protein,
+    into = c("Protein", "Position"),
+    sep = "_"
+  ) %>%
+  mutate("Quantification" = log2FC) %>%
+  dplyr::select(c(Protein, Position, Quantification)) %>%
+  filter(!is.na(Protein) & !is.na(Position) & !is.na(Quantification)) %>%
+  write.csv(paste0(output_dir, "RoKAI input.csv"), quote = FALSE, row.names = FALSE)
+
+# For the advanced tool:
+# Raw phosphosite data
+MSstatsPTM_processed_filtered$PTM$ProteinLevelData %>%
+  mutate(
+    Sample = paste(BioReplicate, Condition, sep = "_"),
+    Abundance = 2 ^ Abundance # Reverse log2 transformation
+    ) %>%
+  separate(
+    col = Protein,
+    into = c("Protein", "Position"),
+    sep = "_"
+  ) %>%
+  filter(!is.na(Protein) & !is.na(Position)) %>%
+  arrange(Sample) %>%
+  pivot_wider(
+    id_cols = c(Protein, Position),
+    values_from = Abundance,
+    names_from = Sample,
+    values_fn = mean
+  ) %>%
+  write.csv(paste0(output_dir, "RoKAI phosphorylation data.csv"), quote = FALSE, row.names = FALSE)
+
+# Raw protein data
+MSstatsPTM_processed$PROTEIN$ProteinLevelData %>%
+  mutate(
+    Sample = paste(BioReplicate, Condition, sep = "_"),
+    Abundance = 2 ^ Abundance
+    ) %>%
+  filter(!is.na(Protein)) %>%
+  arrange(Sample) %>%
+  pivot_wider(
+    id_cols = Protein,
+    values_from = Abundance,
+    names_from = Sample,
+    values_fn = mean
+  ) %>%
+  write.csv(paste0(output_dir, "RoKAI protein expression data.csv"), quote = FALSE, row.names = FALSE)
+
+# Metadata
+annotations %>%
+  filter(Condition != "Norm") %>%
+  mutate(
+    RowName = paste(
+      BioReplicate,
+      Condition,
+      ifelse(Sex == "Male", "M", "F"),
+      ifelse(Smoker == TRUE, "S", "NS"),
+      sep = "_"
+    ),
+    Group = ifelse(Condition == "pLL3.7", "Case", "Control")
+  ) %>%
+  dplyr::select(c(RowName, Group, Condition, Smoker, Sex, BioReplicate)) %>%
+  unique() %>%
+  arrange(RowName) %>%
+  t() %>%
+  write.table(paste0(output_dir, "RoKAI metadata.csv"), quote = FALSE, sep = ",", row.names = TRUE, col.names = FALSE)
+
+# Kinase results from RokaiXplorer
+print("Number of kinases identified:")
+nrow(kinase_res)
+print("Number of significantly altered kinases:")
+sum(kinase_res$FDR < 0.05)
+
+# Order the kinases by z-score
+kinase_res$Kinase <- factor(kinase_res$Name) %>%
+  fct_reorder(kinase_res$ZScore, .desc = TRUE)
+
+# Make a plot
+kinase_res %>%
+  arrange(FDR) %>% # Select the top 30 kinases by FDR
+  .[1:30,] %>%
+  ggplot(aes(x = Kinase, y = ZScore, ymin = ZScore - StdErr, ymax = ZScore + StdErr, fill = ZScore)) +
+  geom_col() +
+  geom_errorbar(width = 0.2) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+  ) +
+  labs(
+    title = "Top 30 altered kinases",
+    x = "Kinase",
+    y = "RokaiXplorer z-score",
+    fill = "z-score"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+# Save the plot
+ggsave(paste0(output_dir, "RokaiXplorer kinase plot.png"), width = plot_width, height = plot_height)
+
+# Enrichment analysis for significantly affected kinases
+# make background from all kinases in phosphositeplus and Signor datasets
+kinase_ref <- c(
+  curated$source,
+  str_split_i(SIGNOR$entityA_name, pattern = "_", i = 1)
+) %>%
+  unique()
+
+# Run evoGO enrichment analysis and print top three names by evoGO p-value
+phos_ORA <- calcGOenrichment(
+    goAnnotation = GO_annotation,
+    deGenes = gene_map$ensembl_gene_id[gene_map$uniprotswissprot %in% kinase_res$UniprotID[kinase_res$FDR < 0.05]],
+    universe = gene_map$ensembl_gene_id[gene_map$hgnc_symbol %in% kinase_ref],
+    domain = "BP",
+    minGenes = 5,
+    k = 1
+  ) 
+phos_ORA %>%
+  arrange(evogo.pvalue) %>%
+  .$name %>%
+    .[1:5]
+
+# Plot top enrichment in inferred kinases
+phos_ORA %>%
+  mutate(
+    Ratio = significant / annotated
+  ) %>% # Add useful columns
+  arrange(evogo.pvalue) %>% # Sort by p-value - evoGO algorythm
+  .[1:15, ] %>% # Select the top 15
+  mutate(name = as.factor(str_trunc(name, 40))) %>%
+  ggplot(aes(x = Ratio, y = name, size = annotated, colour = evogo.pvalue)) +
+  geom_point() +
+  labs(
+    title = paste0("Top 15 enriched GO terms - biological processes, inferred kinases"),
+    x = "Ratio",
+    y = "GO term",
+    colour = "evoGO algorithm p-value",
+    size = "Gene count"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Kinase GO term BP plot.png"), width = plot_width, height = plot_height)
+
+# pathview plot of MAPK cascase pathway - hsa04010
+# Prepare data combining inferred kinase z-scores, phoospho and TMT data
+path_dat <- full_join(
+  TMT_res,
+  kinase_res,
+  by = c("Protein_first" = "UniprotID")
+) %>%
+  mutate(TMT = log2FC) %>%
+  full_join(results, by = "Protein_first") %>%
+  mutate(Phos = log2FC.y) %>%
+  full_join(gene_map, by = c("Protein_first" = "uniprotswissprot")) %>%
+  dplyr::select(ensembl_gene_id, ZScore, Phos, TMT) %>%
+  group_by(ensembl_gene_id) %>%
+  summarise(
+    ZScore = mean(ZScore, na.rm = TRUE),
+    Phos = mean(Phos, na.rm = TRUE),
+    TMT = mean(TMT, na.rm = TRUE)
+  )
+
+path_dat_rows <- mapIds(org.Hs.eg.db,
+                     keys = path_dat$ensembl_gene_id,
+                     column = "ENTREZID",
+                     keytype = "ENSEMBL",
+                     multiVals = "first"
+)
+
+path_dat <- as.matrix(path_dat[,-1])
+colnames(path_dat) <- c("z-score", "Phospho", "TMT")
+rownames(path_dat) <- path_dat_rows
+path_dat[is.nan(path_dat)] <- NA
+
+# Change working directory so pathview plots save in the correct location
+og_dir <- getwd()
+setwd(paste0(output_dir, "pathview_plots/"))
+
+tmp <- pathview(
+  gene.data = path_dat,
+  pathway.id = "hsa04010",
+  species = "hsa",
+  gene.idtype = "entrez",
+  multi.state = TRUE,
+  kegg.native = TRUE
+)
+
+# Return to original working directory
+setwd(og_dir)
+
+# Correlation between benchmarKIN and RoKAI z scores
+merge(
+  kinase_res,
+  act_scores,
+  by = "Kinase"
+) %>%
+  ggplot(aes(x = Raw, y = ZScore)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  stat_regline_equation(label.x = 1, label.y = 5) +
+  theme_bw() +
+  labs(
+    x = "benchmarKIN z-score",
+    y = "RokaiXplorer z-score",
+    title = "Kinase z-score correlation"
+  ) +
+  theme_bw()
+
+# Save the plot
+ggsave(paste0(output_dir, "Phos kinase z-score correlation.png"), width = plot_width, height = plot_height)
+
+# Save all the scores as a .csv file
+kinase_res %>%
+write.csv(paste0(output_dir, "Phos_RoKAI_results.csv"), row.names = FALSE)
+```
+
+## Network analysis
+Use the RCy3 package to connect to Cytoscape and make some networks
+```{r Cytoscape plots}
+# Get list of differential proteins
+Dif_prots <- results_protein %>%
+  filter(Dif != "Not significant") %>%
+  .$Protein_first %>%
+  unique
+
+# Check connection to cytoscape
+cytoscapePing()
+
+# Run string analysis using command line in Cytoscape - p53 manually added
+commandsRun(
+  paste0(
+    'string protein query query="',
+    paste(c(Dif_prots, "P04637"), collapse = ","),
+    '" species="Homo sapiens" cutoff=0.9'
+  )
+)
+
+# Get network name to reselect it later
+network_name <- getNetworkName()
+
+# Get clusters
+clustermaker2 <- commandsRun(paste0('cluster mcl network="', network_name, '"'))
+
+# Get cluster information
+clusters <- getTableColumns(table = "node", columns = c("name", "__mclCluster")) %>%
+  group_by(`__mclCluster`) %>%
+  summarise("Cluster_size" = n(), .groups = "drop") %>%
+  filter(!is.na(`__mclCluster`)) %>%
+  arrange(desc(Cluster_size))
+
+# Count numbers of clusters with only two nodes
+sum(clusters$Cluster_size == 2)
+
+# Get node table with cluster assignments
+node_table <- getTableColumns(table = "node")
+
+# Merge fold-change data with node table
+fc_tab <- node_table %>%
+  left_join(mutate(results_protein, "query term" = Protein_first), by = "query term") %>%
+  group_by(name) %>%
+  summarise(log2FC = mean(log2FC), .groups = "drop")
+
+# Change Inf and -Inf values to maximum values
+inf_min <- min(fc_tab$log2FC[is.finite(fc_tab$log2FC)])
+inf_max <- max(fc_tab$log2FC[is.finite(fc_tab$log2FC)])
+fc_tab$log2FC[fc_tab$log2FC == -Inf] <- inf_min
+fc_tab$log2FC[fc_tab$log2FC == Inf] <- inf_max
+
+# Add fold-change column
+loadTableData(
+  fc_tab,
+  table = "node",
+  data.key.column = "name",
+  table.key.column = "name",
+  network = network_name
+)
+
+# Create a continuous color mapping for log2FC
+# Red for upregulated, blue for downregulated
+fc_range <- range(fc_tab$log2FC, na.rm = TRUE)
+
+setNodeColorMapping(
+  table.column = "log2FC",
+  table.column.values = c(min(fc_range), 0, max(fc_range)),
+  colors = c("#0000FF", "#FFFFFF", "#FF0000"),
+  mapping.type = "continuous",
+  style.name = "default",
+  network = network_name
+)
+
+# Set names to gene symbols
+setNodeLabelMapping(
+  table.column = "display name",
+  style.name = "default",
+  network = network_name
+)
+
+# Apply colouring style
+commandsRun('vizmap apply styles="default"')
+
+# Create subnetworks for top five clusters
+for (i in 1:5) {
+  cluster_id <- clusters$`__mclCluster`[i]
+
+  # Set the network
+  setCurrentNetwork(network_name)
+
+  # Clear selection
+  clearSelection(type = "both", network = network_name)
+
+  # Select nodes
+  nodes_in_cluster <- node_table$name[node_table$`__mclCluster` == cluster_id]
+  selectNodes(nodes_in_cluster, by.col = "name")
+
+  # Create subnetwork
+  commandsRun(paste0(
+    'network create nodeList="selected" source="', network_name, '" networkName="Cluster_',
+    i, '"'
+  ))
+
+  layoutNetwork("force-directed")
+
+  # Export subnetwork
+  fitContent()
+
+  exportImage(
+    filename = file.path(output_dir, paste0("Cluster ", i, " network.png")),
+    type = "PNG",
+    resolution = 300,
+    zoom = 200
+  )
+
+  # Wait for processes to complete
+  while (!file.exists(paste0(output_dir, "Cluster ", i, " network.png"))) {
+    Sys.sleep(5)
+  }
+}
+
+# Export cluster data and node table to upload to Jennifer for enrichment analysis
+save(clusters, file = paste0(output_dir, "clusters.rda"))
+save(node_table, file = paste0(output_dir, "node_table.rda"))
+
+# Run enrichment analysis to label clusters
+for (i in 1:5) {
+  cluster_id <- clusters$`__mclCluster`[i]
+
+  cluster_DEGs <- node_table %>%
+    filter(`__mclCluster` == cluster_id) %>%
+    merge(
+      gene_map,
+      by.x = "query term",
+      by.y = "uniprotswissprot",
+      all.x = TRUE
+    ) %>%
+    .$ensembl_gene_id %>%
+    na.omit() %>%
+    unique()
+
+  evoGO_res <- calcGOenrichment(
+    goAnnotation = GO_annotation,
+    deGenes = cluster_DEGs,
+    universe = reference_set_protein,
+    domain = "BP",
+    minGenes = 5,
+    k = 1
+  )
+
+  # Print top three most significant pathways
+  print(paste("Cluster", i, "top three BPs:"))
+  print(evoGO_res %>%
+    arrange(evogo.pvalue) %>%
+    .$name %>%
+    .[1:3])
+}
+
+# Export table of nodes for supplementary data
+node_table %>%
+  filter(!is.na(`__mclCluster`)) %>%
+  lapply(as.character) %>%
+  write.csv(paste0(output_dir, "Phos_STRING_clusters.csv"))
+```
