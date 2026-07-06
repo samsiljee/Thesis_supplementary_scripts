@@ -1,0 +1,565 @@
+# Script to try out cilia beat frequency analysis in R
+# Sam Siljee
+# 19 February 2025
+
+---
+title: "CBF analysis"
+author: "Sam Siljee"
+date: '2022-06-17'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this script I'm using the variable `d` to represent the donor/well, `x` for the pixel x coordinate, `y` for the pixel y coordinate, and `z` for the frame number.
+
+```{r packages, include = FALSE}
+library(dplyr) # Pipe and data manipulation
+library(ggplot2) # plotting
+library(signal) # Windowing for FFT
+library(tiff) # Read in .tiff files
+library(png) # Write png images
+library(stringr) # Strip ".MOV" from file names
+library(tidyr) # For pivot_wider function in FFT data summary
+library(EBImage) # For label function to identify clusters
+```
+
+```{r Set some constants}
+# Directories
+input_dir <- "Input/"
+output_dir <- "Output/"
+
+# Options for running the script
+load_from_rda <- TRUE
+write_tables <- FALSE
+run_signal_power <- FALSE
+run_variance <- FALSE
+run_sd <- FALSE
+run_phase_variance <- FALSE
+run_shannon_phase_entropy <- FALSE
+run_MLAD <- FALSE
+run_cluster_phase <- FALSE
+
+# Set video details
+height <- 360
+width <- 640
+frame_rate <- 480
+num_frames <- 1024
+
+# Set some thresholds
+frequency_threshold <- 3.1
+cluster_size_threshold <- 3
+FFT_ratio_threshold <- 0.014
+phase_bins <- 10
+
+# LUT file
+annotations_file <- "annotations.tsv"
+```
+
+```{r Setup}
+# Vector for donor IDs - read from available .MOV files in input folder
+donor_IDs <- list.files(input_dir) %>%
+  grep(pattern = ".MOV$", value = TRUE) %>%
+  str_remove(".MOV")
+
+# Read in annotations
+annotations <- read.delim(paste0(input_dir, annotations_file))
+
+# Load functions
+source("CBF_functions.R")
+```
+
+## Run cilia analysis
+Changed to run the whole analysis on a donor by donor basis to speed up processing. only saving the 3D arrays from the video input rather than saving data from every intermittent step.
+```{r Run cilia beat frequency analysis - whole process by donor}
+# Initialise list to save unconverted FFT data for all donors
+FFT_list_unconverted <- list()
+
+# Initialise list to save converted FFT data for all donors
+FFT_list_converted <- list()
+
+# Initialise list to save phase metrics
+phase_metrics <- list()
+
+# Repeat process for each donor
+for (d in donor_IDs) {
+  # Print message to keep track of progress
+  print(
+    paste0(
+      "Starting on donor ",
+      d,
+      "; ",
+      which(donor_IDs %in% d),
+      " of ",
+      length(donor_IDs)
+    )
+  )
+
+  ## Extract frames / load data ----
+  if (load_from_rda) {
+    # Load from prepared data
+    print("Loading .rda")
+    load(paste0(output_dir, "prepared_data/", d, "_3D_array.rda"))
+  } else {
+    # Read in from video data
+    print("Extracting frames")
+
+    # Use ffmpeg to extract all frames as single-channel greyscale TIFF (lossless)
+    cmd <- paste0(
+      "ffmpeg -i ",
+      input_dir,
+      d,
+      ".MOV -pix_fmt gray -compression_algo lzw -vsync 0 ",
+      output_dir,
+      "temp_frames/frame_%d.tiff"
+    )
+    system(cmd)
+
+    # Initialize an empty 3D array
+    video_array <- array(NA, dim = c(height, width, num_frames))
+
+    # Read in .png frames and select one channel (gray scale)
+    for (z in 1:num_frames) {
+      # Read in the frame
+      video_array[, , z] <- readTIFF(paste0(output_dir, "temp_frames/frame_", z, ".tiff"), as.is = TRUE)
+    }
+
+    # Clear free space
+    gc()
+
+    # Remove temp frames from system
+    cmd <- paste0(
+      "rm ",
+      output_dir,
+      "temp_frames/frame_*.tiff"
+    )
+    system(cmd)
+
+    # Save the data as a .rda file - for faster loading in future
+    save(video_array, file = paste0(output_dir, "prepared_data/", d, "_3D_array.rda"))
+  } # Close data loading else statement
+
+  # Compensate for fluctuating background brightness
+  frame_means <- numeric()
+  for (z in 1:num_frames) {
+    frame_means <- c(frame_means, mean(video_array[, , z]))
+  }
+
+  # Centre compensation around zero
+  frame_means <- frame_means - mean(frame_means)
+
+  # Subtract compensation from video array
+  for (z in 1:num_frames) {
+    video_array[, , z] <- video_array[, , z] - frame_means[z]
+  }
+
+  ## Signal power ----
+  if (run_signal_power) {
+    print("Making signal power images")
+
+    # Initialise blank matrix for signal power image
+    signal_power_image <- matrix(data = 0, ncol = width, nrow = height)
+
+    # Loop through frames to get differences
+    for (z in 2:num_frames) {
+      # Get absolute difference with previous frame
+      difference <- abs(video_array[, , z] - video_array[, , (z - 1)])
+
+      # Add to signal power image
+      signal_power_image <- signal_power_image + difference
+    }
+
+    # Save as a PNG image - grayscale
+    writePNG(normalise_image(signal_power_image), paste0(output_dir, "signal_power_images/signal_power_image_", d, ".png"))
+
+    # Save as .tsv file
+    if (write_tables) {
+      write.table(
+        signal_power_image,
+        paste0(output_dir, "tsv_results/", d, "_signal_power_image.tsv"),
+        row.names = FALSE,
+        col.names = FALSE,
+        sep = "\t"
+      )
+    }
+
+    # Clear free space
+    gc()
+  }
+
+  ## Variance ----
+  if (run_variance) {
+    print("Making variance images")
+
+    # Initialise blank matrix
+    variance_matrix <- matrix(ncol = width, nrow = height)
+
+    # Get variance by pixel
+    for (y in 1:width) { # loop through columns
+      for (x in 1:height) { # Loop through rows
+        # Calculate variances and add to list in the required position
+        variance_matrix[x, y] <- var(video_array[x, y, ])
+      }
+    }
+
+    # Save as a PNG image - grayscale
+    writePNG(normalise_image(variance_matrix), paste0(output_dir, "variance_images/variance_image_", d, ".png"))
+
+    # Save as .tsv file
+    if (write_tables) {
+      write.table(
+        variance_matrix,
+        paste0(output_dir, "tsv_results/", d, "_variance_image.tsv"),
+        row.names = FALSE,
+        col.names = FALSE,
+        sep = "\t"
+      )
+    }
+  }
+
+  ## SD ----
+  if (run_sd) {
+    print("Making SD images")
+
+    # Initialise blank matrix
+    sd_matrix <- matrix(ncol = width, nrow = height)
+
+    # Get variance by pixel
+    for (y in 1:width) { # loop through columns
+      for (x in 1:height) { # Loop through rows
+        # Calculate variances and add to list in the required position
+        sd_matrix[x, y] <- sd(video_array[x, y, ])
+      }
+    }
+
+    # Save as a PNG image - grayscale
+    writePNG(normalise_image(sd_matrix), paste0(output_dir, "sd_images/sd_image_", d, ".png"))
+
+    # Save as .tsv file
+    if (write_tables) {
+      write.table(
+        sd_matrix,
+        paste0(output_dir, "tsv_results/", d, "_sd_image.tsv"),
+        row.names = FALSE,
+        col.names = FALSE,
+        sep = "\t"
+      )
+    }
+  }
+
+  ## FFT ----
+  print("Making FFT images")
+
+  # Create frequency vector
+  freq <- seq(0, frame_rate / 2, length.out = num_frames / 2 + 1)
+
+  # Calculate offset to exclude results below the threshold
+  threshold_offset <- sum(freq < frequency_threshold)
+
+  # Initialise matrices to contain dominant frequencies
+  FFT_matrix <- matrix(ncol = width, nrow = height)
+  FFT_matrix_unconverted <- FFT_matrix
+  phase_matrix <- FFT_matrix
+  FFT_ratio_matrix <- FFT_matrix
+
+  # Calculate FFT and extract dominant frequencies
+  for (y in 1:width) { # loop through columns
+    for (x in 1:height) { # Loop through rows
+      # Get vector of pixel values
+      pixel_values <- video_array[x, y, ]
+
+      # Run FFT
+      fft_result <- fft(pixel_values)
+
+      # Get magnitudes - using only first half of FFT results
+      magnitude <- abs(fft_result)[1:(num_frames / 2 + 1)]
+
+      # Set all magnitudes below frequency threshold to -1 so they won't be selected
+      magnitude[1:threshold_offset] <- -1
+
+      # Find the frequency with maximum amplitude
+      max_index <- which.max(magnitude)
+
+      # Add to list in the required position - converted to real frequency and unconverted
+      FFT_matrix[x, y] <- freq[max_index]
+      FFT_matrix_unconverted[x, y] <- max_index
+
+      # Add to phase matrix
+      phase_matrix[x, y] <- Arg(fft_result[max_index])
+
+      # Add to ratio matrix (for masking)
+      FFT_ratio_matrix[x, y] <- max(magnitude) / sum(magnitude)
+    }
+  }
+
+  # Add to list of all donors
+  FFT_list_unconverted[[d]] <- FFT_matrix_unconverted
+  FFT_list_converted[[d]] <- FFT_matrix
+
+  # Save as a PNG image - grayscale
+  writePNG(normalise_image(FFT_matrix), paste0(output_dir, "fft_images/FFT_freq_image_", d, ".png"))
+  writePNG(normalise_image(phase_matrix), paste0(output_dir, "fft_images/FFT_phase_image_", d, ".png"))
+
+  # Save as .tsv file
+  if (write_tables) {
+    write.table(
+      FFT_matrix,
+      paste0(output_dir, "tsv_results/", d, "_fft_image.tsv"),
+      row.names = FALSE,
+      col.names = FALSE,
+      sep = "\t"
+    )
+    write.table(
+      phase_matrix,
+      paste0(output_dir, "tsv_results/", d, "_fft_phase_image.tsv"),
+      row.names = FALSE,
+      col.names = FALSE,
+      sep = "\t"
+    )
+  }
+
+  # Save as a PNG image - grayscale
+  writePNG(normalise_image(FFT_matrix_unconverted), paste0(output_dir, "fft_images/FFT_unconverted_freq_image_", d, ".png"))
+
+  # Save as .tsv file
+  if (write_tables) {
+    write.table(
+      FFT_matrix_unconverted,
+      paste0(output_dir, "tsv_results/", d, "_fft_unconverted_image.tsv"),
+      row.names = FALSE,
+      col.names = FALSE,
+      sep = "\t"
+    )
+  }
+
+  # Clear free space
+  gc()
+
+  ## Ratio masking ----
+  print("FFT ratio images/masking")
+  # Save as a PNG image - grayscale
+  writePNG(normalise_image(FFT_ratio_matrix), paste0(output_dir, "ratio_images/FFT_ratio_image_", d, ".png"))
+
+  # Save as .tsv file
+  if (write_tables) {
+    write.table(
+      FFT_ratio_matrix,
+      paste0(output_dir, "tsv_results/", d, "_fft_ratio_image.tsv"),
+      row.names = FALSE,
+      col.names = FALSE,
+      sep = "\t"
+    )
+  }
+
+  # Binarise using the threshold as a mask
+  # Fill the cluster mask
+  ratio_mask <- FFT_ratio_matrix > FFT_ratio_threshold
+
+  # Save as .tsv file
+  write.table(
+    ratio_mask,
+    paste0(output_dir, "tsv_results/", d, "_ratio_mask.tsv"),
+    row.names = FALSE,
+    col.names = FALSE,
+    sep = "\t"
+  )
+
+  # Save as a PNG image - grayscale
+  writePNG(normalise_image(ratio_mask), paste0(output_dir, "ratio_images/Ratio_mask_", d, ".png"))
+
+  ## Identify clusters ----
+  print("Identifying clusters")
+  # Use custom function to identify cluster sizes
+  cluster_size_matrix <- identify_clusters(FFT_matrix_unconverted)
+
+  # Save as a PNG image - grayscale
+  writePNG(normalise_image(cluster_size_matrix), paste0(output_dir, "cluster_images/Cluster_size_image_", d, ".png"))
+
+  # Create binary mask
+  # Fill the cluster mask
+  cluster_mask <- fill_clusters(cluster_size_matrix) > cluster_size_threshold
+
+  # Save as .tsv file
+  write.table(
+    cluster_mask,
+    paste0(output_dir, "tsv_results/", d, "_cluster_mask.tsv"),
+    row.names = FALSE,
+    col.names = FALSE,
+    sep = "\t"
+  )
+
+  # Save as a PNG image - grayscale
+  writePNG(normalise_image(cluster_mask), paste0(output_dir, "cluster_images/Cluster_mask_", d, ".png"))
+
+  ## Phase clusters ----
+  print("Identifying phase clusters")
+
+  # Save phase image
+  writePNG(normalise_image(phase_matrix), paste0(output_dir, "phase_images/Phase_image_", d, ".png"))
+
+  # Use custom function to identify cluster sizes
+  phase_cluster_size_matrix <- identify_clusters(
+    array(
+      as.numeric(cut(phase_matrix, breaks = seq(-pi, pi, length.out = phase_bins))),
+      dim = dim(phase_matrix)
+    )
+  )
+
+  # Save as a PNG image - grayscale
+  writePNG(normalise_image(phase_cluster_size_matrix), paste0(output_dir, "phase_images/Phase_cluster_size_image_", d, ".png"))
+
+  # Create binary mask
+  # Fill the cluster mask
+  phase_cluster_mask <- fill_clusters(phase_cluster_size_matrix) > cluster_size_threshold
+
+  # Save as .tsv file
+  write.table(
+    cluster_mask,
+    paste0(output_dir, "tsv_results/", d, "_phase_cluster_mask.tsv"),
+    row.names = FALSE,
+    col.names = FALSE,
+    sep = "\t"
+  )
+
+  # Save as a PNG image - grayscale
+  writePNG(normalise_image(phase_cluster_mask), paste0(output_dir, "phase_images/Phase_cluster_mask_", d, ".png"))
+
+  ## Histograms ----
+  print("Making histograms")
+
+  # Histogram of converted frequencies - filtered by cluster mask
+  png(paste0(output_dir, "histograms/", d, " frequency histogram.png"), width = 8 * 100, height = 5.5 * 100, res = 100)
+  print(ggplot(data.frame(Frequency = as.numeric(FFT_matrix[cluster_mask])), aes(x = Frequency)) +
+    geom_histogram(binwidth = 1) +
+    labs(x = "Frequency (Hz)", y = "Count", title = paste("Histogram of dominant frequency:", d)) +
+    theme_bw())
+  dev.off()
+
+  # Histogram of unconverted (indexes)
+  png(paste0(output_dir, "histograms/", d, " frequency index histogram.png"), width = 8 * 100, height = 5.5 * 100, res = 100)
+  print(ggplot(data.frame(Index = as.numeric(FFT_matrix_unconverted[cluster_mask])), aes(x = Index)) +
+    geom_histogram(binwidth = 1) +
+    labs(x = "Dominant frequency index (binwidth = 1)", y = "Count", title = paste("Histogram of dominant frequency indexes:", d)) +
+    theme_bw())
+  dev.off()
+
+  ## Phase metrics ----
+  phase_metrics[[d]] <- analyze_phase_cluster(phaseImage = phase_matrix, clusterMask = cluster_mask, threshold = pi / 4)
+} # Close loop over donors
+
+# Save the FFT data as .rda files
+save(FFT_list_unconverted, file = paste0(output_dir, "FFT_list_unconverted.rda"))
+save(FFT_list_converted, file = paste0(output_dir, "FFT_list_converted.rda"))
+save(phase_metrics, file = paste0(output_dir, "phase_metrics.rda"))
+```
+
+## Check bitdepth of signal
+Code to check bit depth of signal
+```{r Signal bitdepth}
+# Initialise vector of mean dit depth values
+bit_depth <- numeric()
+
+image_mean_bit_depth <- numeric()
+
+# Repeat process for each donor
+for (d in donor_IDs) {
+  # Print message to keep track of progress
+  print(
+    paste0(
+      "Starting on donor ",
+      d,
+      "; ",
+      which(donor_IDs %in% d),
+      " of ",
+      length(donor_IDs)
+    )
+  )
+
+  ## Extract frames / load data ----
+  if (load_from_rda) {
+    # Load from prepared data
+    print("Loading .rda")
+    load(paste0(output_dir, "prepared_data/", d, "_3D_array.rda"))
+  } else {
+    # Read in from video data
+    print("Extracting frames")
+
+    # Use ffmpeg to extract all frames as single-channel greyscale TIFF (lossless)
+    cmd <- paste0(
+      "ffmpeg -i ",
+      input_dir,
+      d,
+      ".MOV -pix_fmt gray -compression_algo lzw -vsync 0 ",
+      output_dir,
+      "temp_frames/frame_%d.tiff"
+    )
+    system(cmd)
+
+    # Initialize an empty 3D array
+    video_array <- array(NA, dim = c(height, width, num_frames))
+
+    # Read in .png frames and select one channel (gray scale)
+    for (z in 1:num_frames) {
+      # Read in the frame
+      video_array[, , z] <- readTIFF(paste0(output_dir, "temp_frames/frame_", z, ".tiff"), as.is = TRUE)
+    }
+
+    # Clear free space
+    gc()
+
+    # Remove temp frames from system
+    cmd <- paste0(
+      "rm ",
+      output_dir,
+      "temp_frames/frame_*.tiff"
+    )
+    system(cmd)
+
+    # Save the data as a .rda file - for faster loading in future
+    save(video_array, file = paste0(output_dir, "prepared_data/", d, "_3D_array.rda"))
+  } # Close data loading else statement
+
+  # Initialise bitdepth vetor for this image
+  image_bit_depth <- numeric()
+
+  ## Bit depth ----
+  for (x in 1:height) {
+    for (y in 1:width) {
+      image_bit_depth <- c(
+        image_bit_depth,
+        length(unique(video_array[x, y, ]))
+      )
+    }
+  }
+
+  # Add mean image bit depth
+  image_mean_bit_depth <- c(image_mean_bit_depth, mean(image_bit_depth))
+  bit_depth <- c(bit_depth, image_bit_depth)
+} # Close loop over donors
+
+summary(image_mean_bit_depth)
+summary(bit_depth)
+
+# Add in metadata and summarise
+bit_depth_summary <- merge(
+  data.frame(
+    ID = donor_IDs,
+    bit_depth = image_mean_bit_depth
+  ),
+  annotations,
+  by = "ID"
+) %>%
+  group_by(Donor, Condition) %>%
+  summarize(bit_depth_mean = mean(bit_depth), .groups = "drop")
+
+# Perform paired t-test
+bit_depth_test <- t.test(
+   dplyr::filter(bit_depth_summary, Condition == "p53 KD")$bit_depth_mean,
+   dplyr::filter(bit_depth_summary, Condition == "Control")$bit_depth_mean
+   , paired = TRUE)
+
+# Display results
+interpret_t_test(bit_depth_test, bit_depth_summary, "bit_depth_mean")
+```
