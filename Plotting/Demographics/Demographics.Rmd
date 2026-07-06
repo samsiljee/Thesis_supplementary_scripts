@@ -1,0 +1,152 @@
+---
+title: "Demographics"
+author: "Sam Siljee"
+date: "2025-09-07"
+output: html_document
+---
+
+# Script to produce plots of demographics of PhD project cohort
+# Written by Sam Siljee 07/09/2023
+# MIT licence
+
+## Setup
+```{r Setup}
+library(tidyverse)
+library(readxl)
+
+# Files and directories
+input_dir <- paste0(getwd(), "/data/")
+output_dir <- paste0(getwd(), "/../produced_plots/demographics/")
+clinical_data_file <- "lung_patient_clinical_data_summary.xlsx"
+```
+
+## Data loading
+```{r}
+# Read in data and convert character columns to factors
+dat <- read_excel(paste0(input_dir, clinical_data_file)) %>%
+  mutate_if(is.character, as.factor)
+
+# # Remove excluded samples
+# dat <- dat[-which(dat$`Sample ID` %in% c("22-102", "23-020")),]
+```
+
+## Basic stats
+Run some basic demographic summaries
+```{r Basic stats}
+# Proportion of population female
+mean(dat$Sex == "F")
+mean(dat$Sex == "M")
+
+# Proportions smoking
+mean(dat$Smoking == "Never smoked", na.rm = TRUE)
+mean(dat$Smoking %in% c("Current", "Current/past"), na.rm = TRUE)
+mean(dat$Smoking == "Quit", na.rm = TRUE)
+
+# Table ethnicity data
+dat %>%
+  group_by(Ethnicity) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count))
+
+# Ethnicity proportions
+mean(dat$Ethnicity == "European")
+mean(dat$Ethnicity == "Maori")
+
+# Proportion with genetic testing
+mean(!is.na(dat$molecular))
+
+# Age description
+mean(dat$Age, na.rm = TRUE)
+sd(dat$Age, na.rm = TRUE)
+
+# Diagnosis
+dat %>%
+  group_by(Diagnosis) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count))
+
+mean(dat$Diagnosis == "Adenocarcinoma", na.rm = TRUE)
+mean(dat$Diagnosis == "Squamous cell carcinoma", na.rm = TRUE)
+```
+
+## Plots
+Make some different plots for thesis figures
+```{r Plots}
+
+# Plot ethnicity data
+dat %>%
+  mutate(Ethnicity = ifelse(Ethnicity %in% c("European",
+                                             "Maori",
+                                             "No consent given",
+                                             "Not stated",
+                                             "Maori/European",
+                                             "Pacific Islander"),
+                            as.character(Ethnicity), "Other")) %>%
+  group_by(Ethnicity) %>%
+  summarise(Count = n()) %>%
+  ggplot(aes(x = reorder(Ethnicity, -Count), y = Count, fill = reorder(Ethnicity, -Count))) +
+  theme_bw() +
+  geom_bar(stat = "identity", col = "black") +
+  geom_text(aes(label = Count), vjust = -0.5) +
+  theme(axis.text.x = element_text(angle = 60, vjust = 0.5),
+        axis.title.x=element_blank(),
+        legend.position = "none") +
+  ggtitle("Donor ethnicity")
+# And saving
+ggsave("produced_plots/demographics/ethnicity.png", width = 8, height = 5.5)
+
+# Plot ages
+dat %>%
+  ggplot(aes(x = Age)) +
+  theme_bw() +
+  geom_histogram(binwidth = 5, col = "black", fill = "darkblue", alpha = 0.5) +
+  ylab("Count") +
+  ggtitle("Age of donors")
+# And saving
+ggsave("produced_plots/demographics/age_histogram.png", width = 8, height = 5.5)
+
+# Density plot of ages by sex
+dat %>%
+  ggplot(aes(x = Age, fill = Sex)) +
+  theme_bw() +
+  # geom_histogram(position = "identity", binwidth = 2, col = "black", alpha = 0.5) +
+  geom_density(alpha = 0.5) +
+  ggtitle("Donor age by sex")
+# And saving
+ggsave("produced_plots/demographics/age_by_sex_density.png", width = 8, height = 5.5)
+
+# Plot site
+dat %>%
+  mutate(Site = ifelse(Site %in% c("RUL",
+                                   "RLL",
+                                   "LUL",
+                                   "LLL"),
+                            as.character(Site), "Multiple")) %>%
+  group_by(Site) %>%
+  summarise(Count = n()) %>%
+  ggplot(aes(x = Site, y = Count, fill = Site)) +
+  theme_bw() +
+  geom_bar(stat = "identity", col = "black") +
+  geom_text(aes(label = Count), vjust = -0.5) +
+  theme(axis.text.x = element_text(angle = 60, vjust = 0.5),
+        axis.title.x=element_blank(),
+        legend.position = "none") +
+  ggtitle("Site of tissue collected")
+# And saving
+ggsave("produced_plots/demographics/tissue_site.png", width = 8, height = 5.5)
+
+# Plot diagnosis
+dat %>%
+  group_by(Diagnosis) %>%
+  summarise(Count = n()) %>%
+  ggplot(aes(x = reorder(Diagnosis, -Count), y = Count, fill = reorder(Diagnosis, -Count))) +
+  theme_bw() +
+  geom_bar(stat = "identity", col = "black") +
+  geom_text(aes(label = Count), vjust = -0.5) +
+  theme(axis.text.x = element_text(angle = 60, vjust = 0.5),
+        axis.title.x=element_blank(),
+        legend.position = "none") +
+  ggtitle("Diagnosis")
+# And saving
+ggsave("produced_plots/demographics/diagnosis.png", width = 8, height = 5.5)
+```

@@ -1,0 +1,351 @@
+---
+title: "TEER visualisation"
+author: "Sam Siljee"
+date: '2022-06-17'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, include = FALSE}
+library("dplyr")
+library("ggplot2")
+library("tidyr")
+library("rstatix") # To run ANOVA and t-test
+library("ggpubr") # Easy QQ plot
+
+# Files and directories
+input_dir <- paste0(getwd(), "/data/")
+output_dir <- paste0(getwd(), "/../produced_plots/TEER/")
+final_data_file <- "final_TEER_data.tsv"
+annotations_file <- "annotations.tsv"
+colours_file <- "colours.csv"
+phenotype_summary_path <- paste0(input_dir, "../../Misc/data/phenotype_summary.csv")
+```
+
+
+## Load the data
+```{r Load the data}
+# Read in annotations
+annotations <- read.table(paste0(input_dir, annotations_file), sep = "\t", header = TRUE, stringsAsFactors = TRUE) %>% mutate(Sample = paste(Donor, Condition, sep = "_"))
+
+# Custom colour scheme for plotting
+custom_colours <- read.csv(paste0(input_dir, "../../", colours_file))$Colour
+names(custom_colours) <- read.csv(paste0(input_dir, "../../", colours_file))$Name
+
+# Reading in the TEER readings
+TEER_data <- read.table(paste0(input_dir, final_data_file), sep = "\t", header = TRUE, stringsAsFactors = TRUE)
+
+# Merge with annotations
+TEER_data <- merge(
+  TEER_data,
+  annotations
+)
+
+# Summarise the replicates
+dat_summarised <- TEER_data %>%
+  group_by(Donor, Condition, DayPostAirlift) %>%
+  summarize(SD = sd(TEER), TEER = mean(TEER)) %>%
+  as.data.frame()
+```
+# Add to phenotype data
+Summarise and add to the phenotype data
+```{r}
+# Summarise, merge with existing data, and write to .csv for the phenotype summary
+TEER_data %>%
+  pivot_wider(names_from = DayPostAirlift, values_from = TEER, names_glue = "{.value}_{DayPostAirlift}") %>%
+  select(- c(Donor, Well, Condition, Sample)) %>%
+  merge(
+    select(
+      read.csv(phenotype_summary_path),
+      -c(
+        TEER_7,
+        TEER_14,
+        TEER_21,
+        TEER_28
+      )
+    ),
+    by = "Index"
+  ) %>%
+  write.csv(phenotype_summary_path, row.names = FALSE)
+```
+
+# Summarise
+Make some summaries for use in thesis
+```{r summaries}
+# Mean values by condition and by day
+paste("p53 KD mean:", round(mean(TEER_data$TEER[TEER_data$Condition == "pLVUHshp53"])))
+paste("Control mean:", round(mean(TEER_data$TEER[TEER_data$Condition == "pLL3.7"])))
+paste("Day 7 mean:", round(mean(TEER_data$TEER[TEER_data$DayPostAirlift == 7])))
+paste("Day 14 mean:", round(mean(TEER_data$TEER[TEER_data$DayPostAirlift == 14])))
+paste("Day 21 mean:", round(mean(TEER_data$TEER[TEER_data$DayPostAirlift == 21])))
+paste("Day 28 mean:", round(mean(TEER_data$TEER[TEER_data$DayPostAirlift == 28])))
+
+# Get measure of inter-patient heterogeneity
+SD_measures <- c()
+for(d in unique(TEER_data$DayPostAirlift)) {
+  for(c in c("pLVUHshp53", "pLL3.7")) {
+    SD_measures <- paste0(
+      SD_measures,
+      paste0(
+        ", day ",
+        d,
+        ifelse(c == "pLL3.7", " Control SD ", " p53 KD SD "),
+        round(sd(TEER_data$TEER[TEER_data$DayPostAirlift == d & TEER_data$Condition == c]))
+      )
+    )
+  }
+}
+SD_measures
+```
+
+# Stats
+In the publication Chiu et. al. the Two-tailed unpaired Student’s t-test method is used for TEER data.
+Chiu, M. C., Li, C., Liu, X., Yu, Y., Huang, J., Wan, Z., Xiao, D., Chu, H., Cai, J.-P., Zhou, B., Sit, K.-Y., Au, W.-K., Wong, K. K.-Y., Li, G., Chan, J. F.-W., To, K. K.-W., Chen, Z., Jiang, S., Clevers, H., … Zhou, J. (2022). A bipotential organoid model of respiratory epithelium recapitulates high infectivity of SARS-CoV-2 Omicron variant. Cell Discovery, 8(1), 57. https://doi.org/10.1038/s41421-022-00422-1
+However, ANOVA also seems to be commonly used.
+Discussed with Clint, suggested repeated measures ANOVA as the most robust method, with paired t-test for individual time-points.
+Using a mixed three-way anova with one within subjects factor (wells) and two between subjects factors (condition and timepoint) is a way to account for replicates.
+Methods followed:
+https://www.youtube.com/watch?v=wL0MVlusawY
+https://www.datanovia.com/en/lessons/repeated-measures-anova-in-r/
+https://www.datanovia.com/en/lessons/mixed-anova-in-r/
+
+## Outliers
+The identify outliers function from the `rstatix` package has identified two outliers; these are 
+21-161 pLL3.7,	day: 7, well: 2 (TEER 829)
+21-073 pLVUHshp53, day: 14, well: 6 (TEER 528)
+None of these are extreme outliers.
+
+```{r Outliers}
+# First check for outliers
+TEER_data %>%
+  group_by(Condition, DayPostAirlift) %>%
+  identify_outliers(TEER)
+```
+
+## Normality
+The Shapiro-Wilks test was used to check normal distribution of the TEER values.
+Originally one set of TEER values was identified with p > 0.05, namely pLL3.7 controls at day 7.
+I believe this is due to the outlyign data point, as the QQ plot appears to fall largely within the predicted values - save for the highest point. With the addition of more data however this is no longer significant.
+Normality can also be checked by QQ plot
+
+```{r Normality}
+# Use Shapiro-Wilks test to check normal distribution of TEER
+TEER_data %>%
+  group_by(Condition, DayPostAirlift) %>%
+  shapiro_test(TEER)
+
+# QQ plot to check normality
+TEER_data %>%
+  ggqqplot("TEER", ggtheme = theme_bw()) + facet_grid(DayPostAirlift ~ Condition)
+```
+
+## Run ANOVA
+Run the two-way repeated measures ANOVA.
+I'm not yet sure how to handle replicate measures in the two-way ANOVA analysis, so for now I'm summarising the replicates using `mean`.
+I will look into using a different ANOVA method to deal with the replicates.
+```{r ANOVA}
+# Base R ANOVA test
+# anova(lm(TEER ~ Condition * DayPostAirlift, data = TEER_data))
+
+# Run the ANOVA
+anova_res <- anova_test(
+  data = dat_summarised,
+  dv = TEER,
+  wid = Donor,
+  within = c(Condition, DayPostAirlift)
+)
+anova_res
+```
+
+## Sphericity
+After the ANOVA has been run, sphericity can be checked.
+```{r sphericity}
+```
+
+## Post-hoc tests
+After significant two-way interactions have been identified, simple main effect and simple pairwise comparisons can be run
+```{r post-hoc by condition}
+# Run simple main effect one-way ANOVA
+one_way_cond_res <- dat_summarised %>%
+  group_by(DayPostAirlift) %>%
+  anova_test(dv = TEER, wid = Donor, within = Condition) %>%
+  get_anova_table() %>%
+  adjust_pvalue(method = "bonferroni")
+one_way_cond_res
+
+# Run pairwise comparisons
+pairwise_cond_res <- TEER_data %>%
+  group_by(DayPostAirlift) %>%
+  pairwise_t_test(
+    TEER ~ Condition,
+    paired = TRUE,
+    p.adjust.method = "bonferroni"
+  )
+pairwise_cond_res
+```
+
+```{r post-hoc by airlift day}
+# Run simple main effect one-way ANOVA
+one_way_day_res <- dat_summarised %>%
+  group_by(Condition) %>%
+  anova_test(dv = TEER, wid = Donor, within = DayPostAirlift) %>%
+  get_anova_table() %>%
+  adjust_pvalue(method = "bonferroni")
+one_way_day_res
+
+# Run pairwise comparisons
+pairwise_day_res <- TEER_data %>%
+  group_by(Condition) %>%
+  pairwise_t_test(
+    TEER ~ DayPostAirlift,
+    paired = TRUE,
+    p.adjust.method = "bonferroni"
+  )
+pairwise_day_res
+```
+
+```{r combined plot}
+# Creating a combined plot
+dat_summarised %>%
+  ggplot(aes(
+    x = DayPostAirlift,
+    y = TEER,
+    ymin = TEER - SD,
+    ymax = TEER + SD,
+    colour = Donor,
+    shape = Condition
+  )) +
+  geom_point(size = 3) +
+  geom_errorbar(alpha = 0.5, width = 0.2) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(0, 28, by = 7), limits = c(0, 28)) + # Adjust X scale
+  ylim(0, 800) +
+  labs(
+    x = "Day post airlift",
+    y = expression("TEER (" ~ Omega * cm^2 ~ ")"),
+    title = "TEER values by donor - triplicate membranes"
+  ) +
+  theme_bw() +
+  scale_colour_manual(name = "Donor", values = custom_colours)
+
+# And saving
+ggsave("../produced_plots/timeseries/Combined plot.png", width = 8, height = 5.5)
+```
+
+# Bar graphs
+```{r bar graphs}
+# Summarise down to donors
+TEER_data %>%
+  group_by(Condition, DayPostAirlift) %>%
+  summarise(SD = sd(TEER), TEER = mean(TEER)) %>%
+  ggplot(aes(
+    x = Condition,
+    y = TEER,
+    ymin = TEER - SD,
+    ymax = TEER + SD,
+    fill = Condition
+  )) +
+  geom_col() +
+  geom_errorbar(alpha = 0.5, width = 0.2) +
+  facet_wrap("DayPostAirlift") +
+  labs(x = "Day post airlift", y = expression("TEER (" ~ Omega * cm^2 ~ ")")) +
+  ggtitle("TEER values by day post airlift") +
+  theme_bw()
+
+# And saving
+ggsave("../produced_plots/timeseries/Facet bar plot.png", width = 8, height = 5.5)
+```
+
+# Box plot
+```{r box plot}
+TEER_data %>%
+  ggplot(aes(
+    x = Condition,
+    y = TEER,
+    fill = Condition
+  )) +
+  geom_boxplot() +
+  facet_wrap("DayPostAirlift") +
+  labs(x = "Day post airlift", y = expression("TEER (" ~ Omega * cm^2 ~ ")")) +
+  ggtitle("TEER values by day post airlift") +
+  theme_bw()
+
+# And saving
+ggsave("../produced_plots/timeseries/Facet boxplot.png", width = 8, height = 5.5)
+```
+
+# Paired line chart
+Personally I like this one best.
+```{r paired line plot}
+# Custom labels for facet wrap
+cust_labels <- character()
+for(day in 7*1:4){
+  cust_labels <- c(
+    cust_labels,
+    paste0("Day ", day, ", p.adj = ", filter(pairwise_cond_res, DayPostAirlift == day)$p.adj)
+  )
+}
+names(cust_labels) <- 7*1:4
+
+# Create chart
+dat_summarised %>%
+  ggplot(aes(x = Condition, y = TEER, ymax = TEER + SD, ymin = TEER - SD, col = Donor)) +
+  geom_boxplot(aes(x = Condition, y = TEER, col = Condition)) +
+  geom_point(size = 3) +
+  geom_errorbar(alpha = 0.5, width = 0.07) +
+  geom_line(aes(x = as.numeric(Condition), y = TEER)) +
+  facet_wrap(
+    "DayPostAirlift",
+    labeller = as_labeller(cust_labels),
+    nrow = 1) +
+  labs(
+    x = "Lentivirus vector",
+    y = expression("TEER (" ~ Omega * cm^2 ~ ")"),
+    title = "TEER values by day post airlift") +
+  theme_bw() +
+  theme(strip.background = element_blank()) +
+  scale_colour_manual(name = "Donor", values = custom_colours)
+  
+# Save the plot
+ggsave(paste0(output_dir, "Paired line plot.png"), width = 8, height = 5.5)
+```
+
+# Filtered plot
+
+```{r filtered plot}
+# Creating a combined plot
+singlePlot <- dat %>%
+  filter(Donor %in% tail(unique(dat$Donor), 8)) %>%
+  separate_wider_delim(Donor, delim = " ", names = c("Donor", "Condition")) %>%
+  ggplot(
+    aes(
+      x = DayPostAirlift,
+      y = TEER,
+      colour = Condition,
+      shape = Well
+    )
+  ) +
+  geom_point(
+    alpha = 0.5,
+    show.legend = TRUE
+  ) +
+  geom_line(
+    alpha = 0.5,
+    show.legend = FALSE
+  ) +
+  facet_grid(rows = vars(Donor)) +
+  labs(x = "Day post airlift", y = expression("TEER (" ~ Omega * cm^2 ~ ")")) +
+  ggtitle("TEER values - triplicate membranes") +
+  theme_bw()
+
+singlePlot
+
+# And saving
+ggsave(paste0(output_dir, "filtered plot.png"), width = 8, height = 5.5)
+```
+
+# Facet wrap of timepoints
+For the individual time points, use a facet wrap to present each time-point in bar-graph form (for thesis, not so much for publication)

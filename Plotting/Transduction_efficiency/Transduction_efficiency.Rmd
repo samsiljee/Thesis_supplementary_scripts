@@ -1,0 +1,189 @@
+---
+title: "Combined transduction efficiency"
+author: "Sam Siljee"
+date: '2024-08-19'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages
+library(dplyr)
+library(tidyr) # For pivot_longer and separate_wider function in data import
+library(ggplot2)
+library(stringr)
+library(rstatix) # ANOVA testing
+
+# Files and directories
+input_dir <- paste0(getwd(), "/data/")
+output_dir <- paste0(getwd(), "/../produced_plots/dose-response/")
+
+# Read in data processed in the Data_processing script
+load(paste0(input_dir, "incucyte_data.rda"))
+
+# Correct elapsed times
+incucyte_data <- incucyte_data %>%
+  mutate(Elapsed = round(Elapsed + Elapsed_offset))
+
+# Custom colour scheme for plotting
+custom_colours <- read.csv(paste0(getwd(), "/../colours.csv"))$Colour
+names(custom_colours) <- read.csv(paste0(getwd(), "/../colours.csv"))$Name
+
+# Subset the data to get final ALI data
+ALI_data <- incucyte_data %>%
+  filter(
+      Ratio < 1.5 & # Remove outliers
+      Donor %in% c(
+        "21-052",
+        "21-073",
+        "21-120",
+        "21-161",
+        "21-166",
+        "21-189",
+        "22-069",
+        "22-114"
+      ) &
+      Well_old %in% (paste0("Image.", c(7:9, 12:14, 17:19))) # Only use central images
+  ) %>%
+  filter(!(Donor == "21-161" & Vector == "pLVUHshp53" & vessel_name == "SS 21_161 transduced" & Elapsed == "336")) %>% # Filter out data from replaced scans
+  mutate(
+    Day = round(Elapsed / 24 / 7) * 7 + 7, # Round to the nearest week, and add add a week between seeding and first scan
+    Sample = paste(Donor, Vector, sep = "_")
+  )
+
+# Make summary data for stats
+ALI_data_summarised <- ALI_data %>%
+  group_by(Donor, Vector, Day) %>%
+  summarise(Ratio_mean = mean(Ratio), .groups = "drop")
+```
+
+### Some details on the objectives and fields of view:
+OBJECTIVES
+
+ 10x: Image Resolution: 1.24 microns/pixel
+Image Size: 1408 x 1040 pixels
+Field of View: 1.75 x 1.29 mm
+
+ 4x: Image Resolution: 2.82 microns/pixel
+Image Size: 1536 x 1152 pixels
+Field of View: 4.34 x 3.25 mm
+
+## Plot dose response curves, HEK and primary
+Plot to show primary cells similar to HEK 293 T17 dose responses.
+```{r Create the plot}
+HEK_21_097_data <- incucyte_data %>%
+  filter(vessel_name %in% c("SS 21-097 transduced 268/1/Z PLL3.7/pLVUHshp53", "SS HEK293 T17 transduced 268/1/Z PLL3.7/pLVUHshp53")) %>%
+  group_by(Donor, Vector, Dose) %>%
+  summarise(SD = sd(Ratio), Ratio = mean(Ratio))
+
+# Run some stats
+pLL3.7_test <- t.test(
+  x = HEK_21_097_data[HEK_21_097_data$Donor == "21-097" & HEK_21_097_data$Vector == "pLL3.7", ]$Ratio,
+  y = HEK_21_097_data[HEK_21_097_data$Donor == "HEK293 T/17" & HEK_21_097_data$Vector == "pLL3.7", ]$Ratio,
+  paired = TRUE
+)
+pLL3.7_test
+
+pLVUHshp53_test <- t.test(
+  x = HEK_21_097_data[HEK_21_097_data$Donor == "21-097" & HEK_21_097_data$Vector == "pLVUHshp53", ]$Ratio,
+  y = HEK_21_097_data[HEK_21_097_data$Donor == "HEK293 T/17" & HEK_21_097_data$Vector == "pLVUHshp53", ]$Ratio,
+  paired = TRUE
+)
+pLVUHshp53_test
+
+# Create plot all points
+HEK_21_097_data %>%
+  ggplot(aes(
+    x = Dose,
+    y = Ratio,
+    ymin = Ratio - SD,
+    ymax = Ratio + SD,
+    col = Donor
+  )) +
+  geom_point(size = 3) +
+  geom_errorbar(width = 0.1) +
+  geom_line() +
+  scale_x_continuous(trans = "log2", breaks = c(500, 200, 100, 50, 20, 10, 5, 1)) +
+  facet_wrap("Vector") +
+  labs(
+    x = "Volume lentivirus media added (log scale)",
+    y = "Ratio of area GFP+",
+    title = "Transduction efficiency at 72 hours"
+  ) +
+  theme_bw() +
+  scale_colour_manual(name = "Donor", values = custom_colours)
+
+ggsave(paste0(output_dir, "HEK 293T17 21_097 dose response.png"), width = 8, height = 5.5)
+```
+
+## Plot primary dose response curves
+Plot demonstrating reproducibility of HEK vs primary cells, also showing similarity of different primary cells
+```{r}
+# Create plot
+incucyte_data %>%
+  filter(
+    Donor %in% c("20-241", "21-073", "21-097", "22-091", "22-111", "22-115") &
+      Dose != 0 &
+      Vector == "pLVUHshp53"
+  ) %>%
+  group_by(Donor, Dose, Elapsed) %>%
+  summarise(SD = sd(Ratio, na.rm = TRUE), Ratio = mean(Ratio)) %>%
+  ggplot(aes(x = Dose, y = Ratio, ymin = Ratio - SD, ymax = Ratio + SD, col = Donor)) +
+  geom_point(size = 3, alpha = 0.5) +
+  geom_errorbar(width = 0.1) +
+  facet_wrap("Elapsed") +
+  geom_line() +
+  scale_x_continuous(trans = "log2", breaks = c(500, 200, 100, 50, 20, 10, 5, 1)) +
+  labs(
+    x = "Volume lentivirus media added (log scale)",
+    y = "Ratio of area GFP+",
+    title = "Transduction efficiency at 48 hours"
+  ) +
+  theme_bw() +
+  scale_colour_manual(name = "Donor", values = custom_colours)
+
+ggsave(paste0(output_dir, "Primary cells dose response.png"), width = 8, height = 5.5)
+```
+
+## eGPF expression over time
+Plot demonstrating maintenance of eGFP expression by 2D ALI cultures over the 28 day culture period. Also run ANOVA to test changes over time
+```{r}
+# Run the ANOVA
+anova_pLL3.7 <- anova_test(
+  data = ALI_data_summarised[ALI_data_summarised$Vector == "pLL3.7",],
+  dv = Ratio_mean,
+  wid = Donor,
+  within = Day
+)
+anova_pLL3.7
+
+anova_pLVUHshp53 <- anova_test(
+  data = ALI_data_summarised[ALI_data_summarised$Vector == "pLVUHshp53",],
+  dv = Ratio_mean,
+  wid = Donor,
+  within = Day
+)
+anova_pLVUHshp53
+
+# Get the means
+ALI_data_summarised %>%
+  group_by(Vector, Day) %>%
+  summarise(Ratio = mean(Ratio_mean))
+
+# Make a plot
+ALI_data %>%
+  ggplot(aes(x = Donor, y = Ratio, fill = Sample)) +
+  geom_boxplot() +
+  facet_grid(Vector ~ Day) +
+  labs(
+    x = "Donor",
+    y = "Ratio of area GFP+",
+    title = "eGFP expression during 2D ALI culture"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave(paste0(output_dir, "2D ALI eGFP maintenance.png"), width = 8, height = 5.5)
+```

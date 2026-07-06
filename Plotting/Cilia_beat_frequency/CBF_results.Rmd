@@ -1,0 +1,436 @@
+---
+title: "CBF_results"
+author: "Sam Siljee"
+date: "2025-06-12"
+output: html_document
+---
+
+Script to further process and plot results of the CBF analysis.
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages
+library(dplyr) # Data manipulation
+library(ggplot2) # Plotting
+library(png) # writePNG function for detected motion images
+
+# Files and directories
+input_dir <- paste0(getwd(), "/data/")
+output_dir <- paste0(getwd(), "/../produced_plots/CBF/")
+annotations_file <- "annotations.tsv"
+colours_file <- "colours.csv"
+phenotype_summary_path <- paste0(input_dir, "../../Misc/data/phenotype_summary.csv")
+
+# User variables
+lower_threshold <- 3.1
+upper_threshold <- 19.7
+use_cluster_mask <- TRUE # If false, uses detected_motion instead
+```
+
+## Load the data
+Loading the detected motion masks and .rda output of the CBF analysis
+```{r Load the data}
+# Load custom functions and colours
+source(paste0(input_dir, "../../Functions.R"))
+
+# Read in annotations
+annotations <- read.table(paste0(input_dir, annotations_file), sep = "\t", header = TRUE, stringsAsFactors = TRUE) %>% mutate(Sample = paste(Donor, Condition, sep = "_"))
+
+# Load detected motion
+detected_motion <- list()
+for (i in annotations$Index) {
+  # Read in data
+  ifelse(
+    use_cluster_mask,
+    # Use cluster mask from CBF workflow
+    dat <- read.table(paste0(input_dir, i, "_cluster_mask.tsv"), header = FALSE, sep = "\t") %>% as.matrix(),
+    # Else use detected_motion from multi-DDM (MATLAB) workflow, and convert to logical
+    dat <- ifelse(read.csv(paste0(input_dir, i, "_detected_motion.csv"), header = FALSE) %>% as.matrix() == 1, TRUE, FALSE)
+  )
+  # Add to list
+  detected_motion[[i]] <- dat
+}
+
+# Load FFT frequency data, converted, unconverted, and phase
+load(paste0(input_dir, "FFT_list_unconverted.rda"))
+load(paste0(input_dir, "FFT_list_converted.rda"))
+load(paste0(input_dir, "phase_metrics.rda"))
+```
+
+## Process data
+Mask the frequency data matrix by the motion detected matrix, then extract frequency data to a dataframe.
+Summarise the proportion of motile detected by sample.
+```{r Process frequency data}
+# Initialise dataframe
+frequency_data <- data.frame()
+
+# Loop through all fields of view
+for (i in annotations$Index) {
+  # extract and filter frequency data
+  ifelse(
+    sum(detected_motion[[i]]) == 0, # Check for mask masking everything out
+    frequencies <- 0,
+    frequencies <- FFT_list_converted[[i]][detected_motion[[i]]]
+  )
+
+  # Add to data frame
+  frequency_data <- bind_rows(
+    frequency_data,
+    data.frame(
+      Frequency = frequencies,
+      Index = i
+    )
+  )
+}
+
+# Merge with annotations
+frequency_data <- merge(frequency_data, annotations)
+
+# Summarise proportions of motion detected
+# Initialise blank data frame
+motion_detected <- data.frame()
+
+for (i in annotations$Index) {
+  # Calculate mean motion detected and add to dataframe
+  motion_detected <- bind_rows(
+    motion_detected,
+    data.frame(
+      Index = i,
+      Proportion_motile = mean(detected_motion[[i]]),
+      Proportion_motile_sd = sd(detected_motion[[i]])
+    )
+  )
+}
+
+# Merge with annotations
+motion_detected <- merge(
+  motion_detected,
+  annotations
+)
+
+# Write frequency data to phenotype summary
+# Summarise CBF results
+CBF_freq_summary <- frequency_data %>%
+  group_by(Index) %>%
+  summarize(
+    CBF_freq_mean = mean(Frequency),
+    CBF_freq_sd = sd(Frequency),
+    .groups = "drop"
+  )
+
+# Merge with existing data, and write to .csv
+merge(
+  CBF_freq_summary,
+  motion_detected,
+  by = "Index"
+) %>%
+  dplyr::select(-c(Donor, Condition, Well, Sample)) %>%
+  merge(
+    dplyr::select(
+      read.csv(phenotype_summary_path),
+      -c(
+        CBF_freq_mean,
+        CBF_freq_sd,
+        Proportion_motile,
+        Proportion_motile_sd
+      )
+    ),
+    by = "Index"
+  ) %>%
+  write.csv(phenotype_summary_path, row.names = FALSE)
+```
+
+## Stats
+Run basic paired t-test
+```{r stats}
+# Run t-test to compare frequency
+freq_summary <- frequency_data %>%
+  group_by(Donor, Condition) %>%
+  summarize(freq_mean = mean(Frequency), .groups = "drop")
+
+# Perform paired t-test
+freq_t_test <- t.test(
+   filter(freq_summary, Condition == "pLVUHshp53")$freq_mean,
+   filter(freq_summary, Condition == "pLL3.7")$freq_mean
+   , paired = TRUE)
+
+# Display results
+interpret_t_test(freq_t_test, freq_summary, "freq_mean", c("pLVUHshp53", "pLL3.7"))
+
+# Run t-test to compare proportion detected motion
+prop_motile_summary <- motion_detected %>%
+  group_by(Donor, Condition) %>%
+  summarize(prop_mean = mean(Proportion_motile), .groups = "drop")
+
+# Perform paired t-test
+prop_motile_t_test <- t.test(
+  filter(prop_motile_summary, Condition == "pLVUHshp53")$prop_mean,
+  filter(prop_motile_summary, Condition == "pLL3.7")$prop_mean,
+  paired = TRUE)
+
+# Display results
+interpret_t_test(prop_motile_t_test, prop_motile_summary, "prop_mean", c("pLVUHshp53", "pLL3.7"))
+
+# Run SD to compare inter-patient heterogeneity
+freq_summary %>%
+  group_by(Condition) %>%
+  summarise(SD = sd(freq_mean))
+
+prop_motile_summary %>%
+  group_by(Condition) %>%
+  summarise(SD = sd(prop_mean))
+```
+
+## Frequency boxplot
+Boxplots of pixel dominant frequencies, filtered by cluster mask. Also some stats.
+```{r Frequency boxplot}
+# Box plot of frequencies by sample
+frequency_data %>%
+  filter(Frequency > lower_threshold & Frequency < upper_threshold) %>%
+  ggplot(aes(x = Donor, y = Frequency, fill = Sample)) +
+  geom_boxplot() + # Use arg "outlier.shape = NA" to remove outlier point plotting
+  labs(
+    title = "Filtered pixel frequencies (cilia cluster mask)",
+    subtitle = paste0(
+      "Mean difference: ",
+      round(freq_t_test$estimate, digits = 3),
+      ", p-value: ",
+      formatC(freq_t_test$p.value, format = "e", digits = 2)
+    ),
+    x = "Donor",
+    y = "Frequency (Hz)"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Frequency_boxplot.png"), width = 8, height = 5.5)
+```
+
+## Paired line plots
+Paired line plots - styled after the plot used to display Frequency
+```{r Paired line plot}
+# Summarise the datapoints
+dat_summarised <- frequency_data %>%
+  group_by(Donor, Condition) %>%
+  summarize(SD = sd(Frequency), Frequency = mean(Frequency)) %>%
+  as.data.frame()
+
+# Custom subtitle
+subtitle <- paste0("p.value = ", round(freq_t_test$p.value, digits = 3))
+
+# Create chart
+dat_summarised %>%
+  ggplot(aes(x = Condition, y = Frequency, ymax = Frequency + SD, ymin = Frequency - SD, col = Donor)) +
+  geom_boxplot(aes(x = Condition, y = Frequency, col = Condition)) +
+  geom_point(size = 3) +
+  geom_errorbar(alpha = 0.5, width = 0.07) +
+  geom_line(aes(x = as.numeric(Condition), y = Frequency)) +
+  labs(
+    title = "Dominant FFT frequency values",
+    subtitle = subtitle,
+    x = "Condition",
+    y = "Dominant FFT frequency (Hz)"
+  ) +
+  theme_bw() +
+  scale_colour_manual(name = "Donor", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "CBF paired line plot.png"), width = 8, height = 5.5)
+```
+
+## Proportion of motion in field of view
+Plot showing proption of field of view positive with motion detected.
+```{r Detected motion}
+# Make box plot of proportions motile
+motion_detected %>%
+  ggplot(aes(x = Donor, y = Proportion_motile, fill = Sample)) +
+  geom_boxplot() +
+  labs(
+    x = "Donor",
+    y = "Proportion with motion detected",
+    title = "Proportion of field of view with motion detected"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Proportion_motile_sample_boxplot.png"), width = 8, height = 5.5)
+```
+
+## Phase metric plots
+Plot FFT phase metrics
+```{r}
+# Initialise data.frame for phase metrics
+phase_data <- data_frame()
+
+# Convert list to data frame
+for (i in annotations$Index) {
+  phase_data <- bind_rows(
+    phase_data,
+    c(
+      Index = i,
+      phase_metrics[[i]]
+    )
+  )
+}
+
+# Merge with annotations and convert columns to numeric
+phase_data <- merge(
+  phase_data,
+  annotations
+) %>%
+  mutate(
+    CircularVariance = as.numeric(CircularVariance),
+    Entropy = as.numeric(Entropy),
+    MLAD = as.numeric(MLAD),
+    DiscontinuityFraction = as.numeric(DiscontinuityFraction)
+  )
+
+# Circular variance plot
+phase_data %>%
+  ggplot(aes(x = Donor, y = CircularVariance, fill = Sample)) +
+  geom_boxplot() +
+  labs(
+    x = "Donor",
+    y = "Circular variance",
+    title = "Circular variance by sample"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Circular_variance_boxplot.png"), width = 8, height = 5.5)
+
+# Entropy plot
+phase_data %>%
+  ggplot(aes(x = Donor, y = Entropy, fill = Sample)) +
+  geom_boxplot() +
+  labs(
+    x = "Donor",
+    y = "Entropy",
+    title = "Entropy by sample"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Entropy_boxplot.png"), width = 8, height = 5.5)
+
+# MLAD plot
+phase_data %>%
+  ggplot(aes(x = Donor, y = MLAD, fill = Sample)) +
+  geom_boxplot() +
+  labs(
+    x = "Donor",
+    y = "MLAD",
+    title = "MLAD by sample"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "MLAD_boxplot.png"), width = 8, height = 5.5)
+
+# Discunituity fraction plot
+phase_data %>%
+  ggplot(aes(x = Donor, y = DiscontinuityFraction, fill = Sample)) +
+  geom_boxplot() +
+  labs(
+    x = "Donor",
+    y = "Discontinuity fraction",
+    title = "Discontinuity fraction by sample"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Discontinuity_fraction_boxplot.png"), width = 8, height = 5.5)
+```
+
+## Phase metric stats
+Run some stats on the phase metrics
+```{r Phase metrics stats}
+# Run some stats
+# Circular variance
+CircularVariance_summary <- phase_data %>%
+  group_by(Donor, Condition) %>%
+  summarize(CircularVariance_mean = mean(CircularVariance), .groups = "drop")
+
+# Perform paired t-test and print results
+CircularVariance_test <- t.test(
+  filter(CircularVariance_summary, Condition == "pLVUHshp53")$CircularVariance_mean,
+  filter(CircularVariance_summary, Condition == "pLL3.7")$CircularVariance_mean,
+  paired = TRUE)
+
+# Display results
+interpret_t_test(CircularVariance_test, CircularVariance_summary, "CircularVariance_mean", c("pLVUHshp53", "pLL3.7"))
+
+# Discontinuity Fraction variance
+DiscontinuityFraction_summary <- phase_data %>%
+  group_by(Donor, Condition) %>%
+  summarize(DiscontinuityFraction_mean = mean(DiscontinuityFraction), .groups = "drop")
+
+# Perform paired t-test and print results
+DiscontinuityFraction_test <- t.test(
+  filter(DiscontinuityFraction_summary, Condition == "pLVUHshp53")$DiscontinuityFraction_mean,
+  filter(DiscontinuityFraction_summary, Condition == "pLL3.7")$DiscontinuityFraction_mean,
+  paired = TRUE)
+
+# Display results
+interpret_t_test(DiscontinuityFraction_test, DiscontinuityFraction_summary, "DiscontinuityFraction_mean", c("pLVUHshp53", "pLL3.7"))
+
+# Entropy variance
+Entropy_summary <- phase_data %>%
+  group_by(Donor, Condition) %>%
+  summarize(Entropy_mean = mean(Entropy), .groups = "drop")
+
+# Perform paired t-test and print results
+Entropy_test <- t.test(
+  filter(Entropy_summary, Condition == "pLVUHshp53")$Entropy_mean,
+  filter(Entropy_summary, Condition == "pLL3.7")$Entropy_mean,
+  paired = TRUE)
+
+# Display results
+interpret_t_test(Entropy_test, Entropy_summary, "Entropy_mean", c("pLVUHshp53", "pLL3.7"))
+
+# MLAD variance
+MLAD_summary <- phase_data %>%
+  group_by(Donor, Condition) %>%
+  summarize(MLAD_mean = mean(MLAD), .groups = "drop")
+
+# Perform paired t-test and print results
+MLAD_test <- t.test(
+  filter(MLAD_summary, Condition == "pLVUHshp53")$MLAD_mean,
+  filter(MLAD_summary, Condition == "pLL3.7")$MLAD_mean,
+  paired = TRUE)
+
+# Display results
+interpret_t_test(MLAD_test, MLAD_summary, "MLAD_mean", c("pLVUHshp53", "pLL3.7"))
+```

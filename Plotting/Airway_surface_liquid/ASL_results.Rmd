@@ -1,0 +1,233 @@
+---
+title: "CBF_results"
+author: "Sam Siljee"
+date: "2025-07-18"
+output: html_document
+---
+
+Script to plot results of apical fluid analysis, based on paper by Harvey et. al.
+Harvey, P. R., Tarran, R., Garoff, S., & Myerburg, M. M. (2011). Measurement of the Airway Surface Liquid Volume with Simple Light Refraction Microscopy. American Journal of Respiratory Cell and Molecular Biology, 45(3), 592. https://doi.org/10.1165/RCMB.2010-0484OC
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages
+library(dplyr) # Data manipulation
+library(ggplot2) # Plotting
+library(tidyr) # pivot_wider function
+library(stringr) # String manipulation to get Index names
+
+# Files and directories
+input_dir <- paste0(getwd(), "/data/")
+output_dir <- paste0(getwd(), "/../produced_plots/Apical_fluid/")
+pre_results_file <- "4x_pre_results.rda"
+post_results_file <- "4x_post_results.rda"
+colours_file <- "colours.csv"
+phenotype_summary_path <- paste0(input_dir, "../../Misc/data/phenotype_summary.csv")
+```
+
+## Load the data
+Loading the ouput of the multi-DDM analysis run in MATLAB. Results from the .mat object exported as .csv files.
+```{r Load the data}
+# Load custom functions and colours
+source(paste0(input_dir, "../../Functions.R"))
+
+# Read in the results
+load(paste0(input_dir, pre_results_file))
+pre_results <- results
+load(paste0(input_dir, post_results_file))
+post_results <- results
+
+# Make annotations from results names
+# Create annotations from file names
+annotations <- data.frame(ID = names(results)) %>%
+  mutate(
+    Donor = substr(ID, start = 1, stop = 6),
+    Condition = ifelse(grepl("_[123]_", ID), "Control", "p53 KD"),
+    Sample = paste(Donor, Condition, sep = "_"),
+    Index = str_remove(str_remove(ID, "_90"), "_270")
+  )
+```
+
+## Process the data
+Make summaries of the data and add to phenotype summary
+```{r}
+# Format data from area_results
+area_data <- data.frame()
+for (i in annotations$ID) {
+  area_data <- bind_rows(
+    area_data,
+    data.frame(
+      ID = i,
+      sum_area = pre_results[[i]]["sum_area"],
+      sigmoid_area = pre_results[[i]]["sigmoid_area"],
+      sigmoid_RMSE = sqrt(mean(residuals(pre_results[[i]]$sigmoid_model)^2)),
+      Wash = "Pre"
+    ),
+    data.frame(
+      ID = i,
+      sum_area = post_results[[i]]["sum_area"],
+      sigmoid_area = post_results[[i]]["sigmoid_area"],
+      sigmoid_RMSE = sqrt(mean(residuals(post_results[[i]]$sigmoid_model)^2)),
+      Wash = "Post"
+    )
+  )
+}
+
+# Merge with annotations
+area_data <- merge(
+  area_data,
+  annotations,
+  by = "ID",
+  all.x = TRUE
+)
+
+# Summarise, merge with existing data, and write to .csv for the phenotype summary
+area_data %>%
+  group_by(Index, Wash) %>%
+  summarise(
+    sum_asl_mean = mean(sum_area),
+    sigmoid_asl_mean = mean(sigmoid_area),
+    sum_asl_sd = sd(sum_area),
+    sigmoid_asl_sd = sd(sigmoid_area),
+    sigmoid_asl_rmse = mean(sigmoid_RMSE)
+  ) %>%
+  pivot_wider(names_from = Wash, values_from = c(3:7), names_glue = "{Wash}_{.value}") %>%
+  mutate(Index = str_replace(Index, "-", "_")) %>%
+  merge(
+    dplyr::select(
+      read.csv(phenotype_summary_path),
+      -c(
+        Post_sum_asl_mean,
+        Pre_sum_asl_mean,
+        Post_sigmoid_asl_mean,
+        Pre_sigmoid_asl_mean,
+        Post_sum_asl_sd,
+        Pre_sum_asl_sd,
+        Post_sigmoid_asl_sd,
+        Pre_sigmoid_asl_sd,
+        Post_sigmoid_asl_rmse,
+        Pre_sigmoid_asl_rmse
+      )
+    ),
+    by = "Index"
+  ) %>%
+  write.csv(phenotype_summary_path, row.names = FALSE)
+```
+
+## Area boxplot - sum area
+Boxplots of areas calculated by summing inverse intensity areas
+```{r Area boxplot}
+# Run t-test to compare
+pre_sum_area_summary <- area_data %>%
+  filter(Wash == "Pre") %>%
+  group_by(Donor, Condition) %>%
+  summarize(area_mean = mean(sum_area), .groups = "drop")
+
+# Perform paired t-test
+pre_sum_area_test <- t.test(
+   filter(pre_sum_area_summary, Condition == "p53 KD")$area_mean,
+   filter(pre_sum_area_summary, Condition == "Control")$area_mean
+   , paired = TRUE)
+
+# Display results
+interpret_t_test(pre_sum_area_test, pre_sum_area_summary, "area_mean")
+
+# Box plot of frequencies by sample
+area_data %>%
+  filter(Wash == "Pre") %>%
+  ggplot(aes(x = Donor, y = sum_area, fill = Sample)) +
+  geom_boxplot() +
+  labs(
+    title = "Apical surface fluid (sum intensity values)",
+    x = "Donor",
+    y = "Sum intensity values"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Sum_area_boxplot.png"), width = 8, height = 5.5)
+```
+
+## Area boxplot - sigmoid integration
+Boxplots of areas calculated by integrating sigmoid models
+```{r Area boxplot}
+# Run t-test to compare
+pre_sigmoid_area_summary <- area_data %>%
+  filter(Wash == "Pre") %>%
+  group_by(Donor, Condition) %>%
+  summarize(area_mean = mean(sigmoid_area), .groups = "drop")
+
+# Perform paired t-test
+pre_sigmoid_area_test <- t.test(
+   filter(pre_sigmoid_area_summary, Condition == "p53 KD")$area_mean,
+   filter(pre_sigmoid_area_summary, Condition == "Control")$area_mean
+   , paired = TRUE)
+
+# Display results
+interpret_t_test(pre_sigmoid_area_test, pre_sigmoid_area_summary, "area_mean")
+
+# Box plot of frequencies by sample
+area_data %>%
+  filter(Wash == "Pre") %>%
+  ggplot(aes(x = Donor, y = sigmoid_area, fill = Sample)) +
+  geom_boxplot() +
+  labs(
+    title = "Apical surface fluid (sigmoid integration values)",
+    x = "Donor",
+    y = "Sigmoid integration values"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Sigmoid_area_boxplot.png"), width = 8, height = 5.5)
+```
+
+## Sigmoid RMSE boxplots
+```{r}
+# Run stats on how well the sigmoid curves fit
+# Run t-test to compare
+pre_sigmoid_RMSE_summary <- area_data %>%
+  filter(Wash == "Pre") %>%
+  group_by(Donor, Condition) %>%
+  summarize(RMSE_mean = mean(sigmoid_RMSE), .groups = "drop")
+
+# Perform paired t-test
+pre_sigmoid_RMSE_test <- t.test(
+   filter(pre_sigmoid_RMSE_summary, Condition == "p53 KD")$RMSE_mean,
+   filter(pre_sigmoid_RMSE_summary, Condition == "Control")$RMSE_mean
+   , paired = TRUE)
+
+# Display results
+interpret_t_test(pre_sigmoid_RMSE_test, pre_sigmoid_RMSE_summary, "RMSE_mean")
+
+# Box plot of frequencies by sample
+area_data %>%
+  filter(Wash == "Pre") %>%
+  ggplot(aes(x = Donor, y = sigmoid_RMSE, fill = Sample)) +
+  geom_boxplot() +
+  labs(
+    title = "Sigmoid curve RMSE values",
+    x = "Donor",
+    y = "Sigmoid RMSE values"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Sigmoid_RMSE_boxplot.png"), width = 8, height = 5.5)
+```

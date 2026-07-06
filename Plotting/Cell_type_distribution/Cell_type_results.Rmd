@@ -1,0 +1,1024 @@
+---
+title: "CellProfiler"
+author: "Sam Siljee"
+date: "2025-05-09"
+output: html_document
+---
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages
+library(dplyr) # Data manipulation
+library(tidyr) # pivot_longer and pivot_wider functions
+library(ggplot2) # Plotting
+library(ggh4x) # for independant axes in facet_grid
+library(ggpubr) # Add stats to plots
+
+# User variables
+background_percentile <- 0.95
+scaling_percentiles <- c(0.05, 0.95)
+p63_threshold <- 0.5
+basal_prop <- 0.36
+SCGB1A1_threshold <- 0.5
+club_prop <- 0.032
+MUC5AC_threshold <- 0.5
+goblet_prop <- 0.12
+FOXJ1_threshold <- 0.5
+ciliated_prop <- 0.33
+image_area <- 0.025192038 # Area of image FoV in mm2
+plot_width <- 8
+plot_height <- 5.5
+
+# Files and directories
+input_dir <- paste0(getwd(), "/data/")
+output_dir <- paste0(getwd(), "/../produced_plots/CellProfiler/")
+annotations_file <- "annotations.tsv"
+Ecad_FOXJ1_nuclei_file <- "Ecad_FOXJ1_Nuclei.csv"
+p53_FOXJ1_nuclei_file <- "p53_FOXJ1_Nuclei.csv"
+p53_p63_nuclei_file <- "p53_p63_Nuclei.csv"
+SCGB1A1_p63_nuclei_file <- "SCGB1A1_p63_Nuclei.csv"
+SCGB1A1_MUC5AC_nuclei_file <- "SCGB1A1_MUC5AC_Nuclei.csv"
+SCGB1A1_p63_cells_file <- "SCGB1A1_p63_Cells.csv"
+SCGB1A1_MUC5AC_cells_file <- "SCGB1A1_MUC5AC_Cells.csv"
+Ecad_FOXJ1_membranes_file <- "Ecad_FOXJ1_Membranes.csv"
+```
+
+## Data loading
+Load the data, and process by taking ratio of DRAQ5 expression and subtracting 95th percentile of negative control slides.
+```{r Load the data}
+# Load custom functions
+source(paste0(input_dir, "../../Functions.R"))
+
+# Read in annotations
+annotations <- read.table(paste0(input_dir, annotations_file), sep = "\t", header = TRUE, stringsAsFactors = TRUE) %>% mutate(Sample = paste(Donor, Condition, sep = "_"))
+
+# Read in .csv CellProfiler results and merge with annotations - combine datasets for nuclear stains
+nuclei_data <- bind_rows(
+  merge(read.csv(paste0(input_dir, Ecad_FOXJ1_nuclei_file)), annotations),
+  merge(read.csv(paste0(input_dir, p53_FOXJ1_nuclei_file)), annotations),
+  merge(read.csv(paste0(input_dir, p53_p63_nuclei_file)), annotations),
+  merge(read.csv(paste0(input_dir, SCGB1A1_p63_nuclei_file)), annotations)
+) %>% # Calculate ratios relative to DRAQ5
+  mutate(
+    FOXJ1_ratio = Intensity_MeanIntensity_FOXJ1 / Intensity_MeanIntensity_DRAQ5,
+    p53_ratio = Intensity_MeanIntensity_p53 / Intensity_MeanIntensity_DRAQ5,
+    p63_ratio = Intensity_MeanIntensity_p63 / Intensity_MeanIntensity_DRAQ5,
+    eGFP_ratio = Intensity_MeanIntensity_eGFP / Intensity_MeanIntensity_DRAQ5,
+    Slide = paste(Sample, Experiment, Negative_control)
+  ) %>% # Select required columns
+  dplyr::select(Sample, Donor, Condition, Negative_control, FOXJ1_ratio, p53_ratio, p63_ratio, eGFP_ratio, Intensity_MeanIntensity_FOXJ1, Intensity_MeanIntensity_p53, Intensity_MeanIntensity_p63, Intensity_MeanIntensity_eGFP, Experiment, Slide)
+
+# Read in cells data for SCGB1A1 and MUC5AC
+cells_data <- bind_rows(
+  merge(read.csv(paste0(input_dir, SCGB1A1_p63_cells_file)), annotations),
+  merge(read.csv(paste0(input_dir, SCGB1A1_MUC5AC_cells_file)), annotations)
+) %>%
+  mutate(
+    Slide = paste(Sample, Experiment, Negative_control)
+  ) %>% # Select required columns
+  dplyr::select(Sample, Donor, Condition, Negative_control, Intensity_MeanIntensity_SCGB1A1, Intensity_MeanIntensity_MUC5AC, Intensity_MeanIntensity_eGFP, Experiment, Slide)
+
+# Read in membranes data for E-cadherin
+membranes_data <- merge(read.csv(paste0(input_dir, Ecad_FOXJ1_membranes_file)), annotations) %>%
+  mutate(
+    Slide = paste(Sample, Experiment, Negative_control)
+  ) %>% # Select required columns
+  dplyr::select(Sample, Donor, Condition, Negative_control, Intensity_MeanIntensity_Ecadherin, Intensity_MeanIntensity_eGFP, Experiment, Slide)
+```
+
+## Data processing
+```{r Process the data}
+# Process nuclei data
+# Calculate negative control 95th percentiles
+nuclei_data_neg_summary <- nuclei_data %>%
+  filter(Negative_control == TRUE) %>%
+  group_by(Sample, Experiment) %>%
+  summarise(
+    FOXJ1_95_quant = quantile(FOXJ1_ratio, probs = background_percentile, na.rm = TRUE),
+    p53_95_quant = quantile(p53_ratio, probs = background_percentile, na.rm = TRUE),
+    p63_95_quant = quantile(p63_ratio, probs = background_percentile, na.rm = TRUE),
+    eGFP_95_quant = quantile(eGFP_ratio, probs = background_percentile, na.rm = TRUE)
+  )
+
+# Manually add negative controls for SCGB1A1/p63 based on p53/p63 (same confocal settings used)
+nuclei_data_neg_summary <- nuclei_data_neg_summary %>%
+  filter(Experiment == "p53 p63") %>%
+  mutate(Experiment = "SCGB1A1 p63") %>%
+  bind_rows(
+    nuclei_data_neg_summary
+  )
+
+# Subtract negative control 95th percentiles
+nuclei_data <- merge(nuclei_data, nuclei_data_neg_summary, by = c("Sample", "Experiment")) %>%
+  mutate(
+    FOXJ1_ratio_corrected = FOXJ1_ratio - FOXJ1_95_quant,
+    p53_ratio_corrected = p53_ratio - p53_95_quant,
+    p63_ratio_corrected = p63_ratio - p63_95_quant,
+    eGFP_ratio_corrected = eGFP_ratio - eGFP_95_quant
+  )
+
+# Scale 95th and 5th percentiles from 0 to 1 by slide
+nuclei_data <- nuclei_data %>%
+  group_by(Slide) %>%
+  mutate(
+    FOXJ1_scaled = FOXJ1_ratio_corrected - quantile(FOXJ1_ratio_corrected, probs = scaling_percentiles[1], na.rm = TRUE),
+    p53_scaled = p53_ratio_corrected - quantile(p53_ratio_corrected, probs = scaling_percentiles[1], na.rm = TRUE),
+    p63_scaled = p63_ratio_corrected - quantile(p63_ratio_corrected, probs = scaling_percentiles[1], na.rm = TRUE),
+    eGFP_scaled = eGFP_ratio_corrected - quantile(eGFP_ratio_corrected, probs = scaling_percentiles[1], na.rm = TRUE)
+  ) %>%
+  mutate(
+    FOXJ1_scaled = FOXJ1_scaled / quantile(FOXJ1_scaled, probs = scaling_percentiles[2], na.rm = TRUE),
+    p53_scaled = p53_scaled / quantile(p53_scaled, probs = scaling_percentiles[2], na.rm = TRUE),
+    p63_scaled = p63_scaled / quantile(p63_scaled, probs = scaling_percentiles[2], na.rm = TRUE),
+    eGFP_scaled = eGFP_scaled / quantile(eGFP_scaled, probs = scaling_percentiles[2], na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Calculate eGFP expression quartiles by slide
+nuclei_data <- nuclei_data %>%
+  group_by(Slide) %>%
+  mutate(eGFP_quartile = ifelse(
+    eGFP_scaled < quantile(eGFP_scaled, probs = 0.25, na.rm = TRUE),
+    "Lower",
+    ifelse(
+      eGFP_scaled > quantile(eGFP_scaled, probs = 0.75, na.rm = TRUE),
+      "Upper",
+      "Middle"
+    )
+  ))
+
+# Process cells data
+# Calculate 95th percentiles to subtract background
+cells_data_neg_summary <- cells_data %>%
+  filter(Negative_control == TRUE) %>%
+  group_by(Sample) %>%
+  summarise(
+    SCGB1A1_95_quant = quantile(Intensity_MeanIntensity_SCGB1A1, probs = 0.95, na.rm = TRUE),
+    MUC5AC_95_quant = quantile(Intensity_MeanIntensity_MUC5AC, probs = 0.95, na.rm = TRUE),
+    eGFP_95_quant = quantile(Intensity_MeanIntensity_eGFP, probs = 0.95, na.rm = TRUE)
+  )
+
+# Subtract background - using SCGB1A1/MUC5AC for SCGB1A1/p63; the same confocal settings were used
+cells_data <- merge(cells_data, cells_data_neg_summary, by = "Sample") %>%
+  mutate(
+    SCGB1A1_corrected = Intensity_MeanIntensity_SCGB1A1 - SCGB1A1_95_quant,
+    MUC5AC_corrected = Intensity_MeanIntensity_MUC5AC - MUC5AC_95_quant,
+    eGFP_corrected = Intensity_MeanIntensity_eGFP - eGFP_95_quant
+  )
+
+# Scale 95th and 5th percentiles from 0 to 1 by slide
+cells_data <- cells_data %>%
+  group_by(Slide) %>%
+  mutate(
+    SCGB1A1_scaled = SCGB1A1_corrected - quantile(SCGB1A1_corrected, probs = scaling_percentiles[1], na.rm = TRUE),
+    MUC5AC_scaled = MUC5AC_corrected - quantile(MUC5AC_corrected, probs = scaling_percentiles[1], na.rm = TRUE),
+    eGFP_scaled = eGFP_corrected - quantile(eGFP_corrected, probs = scaling_percentiles[1], na.rm = TRUE)
+  ) %>%
+  mutate(
+    SCGB1A1_scaled = SCGB1A1_scaled / quantile(SCGB1A1_scaled, probs = scaling_percentiles[2], na.rm = TRUE),
+    MUC5AC_scaled = MUC5AC_scaled / quantile(MUC5AC_scaled, probs = scaling_percentiles[2], na.rm = TRUE),
+    eGFP_scaled = eGFP_scaled / quantile(eGFP_scaled, probs = scaling_percentiles[2], na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Calculate eGFP expression quartiles by slide
+cells_data <- cells_data %>%
+  group_by(Slide) %>%
+  mutate(eGFP_quartile = ifelse(
+    eGFP_scaled < quantile(eGFP_scaled, probs = 0.25, na.rm = TRUE),
+    "Lower",
+    ifelse(
+      eGFP_scaled > quantile(eGFP_scaled, probs = 0.75, na.rm = TRUE),
+      "Upper",
+      "Middle"
+    )
+  ))
+
+# Process membranes data
+# Calculate 95th percentiles to subtract background
+membranes_data_neg_summary <- membranes_data %>%
+  filter(Negative_control == TRUE) %>%
+  group_by(Sample) %>%
+  summarise(
+    Ecadherin_95_quant = quantile(Intensity_MeanIntensity_Ecadherin, probs = 0.95, na.rm = TRUE),
+    eGFP_95_quant = quantile(Intensity_MeanIntensity_eGFP, probs = 0.95, na.rm = TRUE)
+  )
+
+# Subtract background - using SCGB1A1/MUC5AC for SCGB1A1/p63; the same confocal settings were used
+membranes_data <- merge(membranes_data, membranes_data_neg_summary, by = "Sample") %>%
+  mutate(
+    Ecadherin_corrected = Intensity_MeanIntensity_Ecadherin - Ecadherin_95_quant,
+    eGFP_corrected = Intensity_MeanIntensity_eGFP - eGFP_95_quant
+  )
+
+# Scale 95th and 5th percentiles from 0 to 1 by slide
+membranes_data <- membranes_data %>%
+  group_by(Slide) %>%
+  mutate(
+    Ecadherin_scaled = Ecadherin_corrected - quantile(Ecadherin_corrected, probs = scaling_percentiles[1], na.rm = TRUE),
+    eGFP_scaled = eGFP_corrected - quantile(eGFP_corrected, probs = scaling_percentiles[1], na.rm = TRUE)
+  ) %>%
+  mutate(
+    Ecadherin_scaled = Ecadherin_scaled / quantile(Ecadherin_scaled, probs = scaling_percentiles[2], na.rm = TRUE),
+    eGFP_scaled = eGFP_scaled / quantile(eGFP_scaled, probs = scaling_percentiles[2], na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Calculate eGFP expression quartiles by slide
+membranes_data <- membranes_data %>%
+  group_by(Slide) %>%
+  mutate(eGFP_quartile = ifelse(
+    eGFP_scaled < quantile(eGFP_scaled, probs = 0.25, na.rm = TRUE),
+    "Lower",
+    ifelse(
+      eGFP_scaled > quantile(eGFP_scaled, probs = 0.75, na.rm = TRUE),
+      "Upper",
+      "Middle"
+    )
+  ))
+```
+
+## Variation and normalisation
+Combine FOXJ1 datasets and plot densities to demonstrate how taking ratio and subtracting background reduces some patient-patient variation
+```{r Ratio effects}
+nuclei_data %>%
+  filter(Negative_control == FALSE & Experiment == "p53 FOXJ1") %>% # Remove negative control results
+  pivot_longer(
+    cols = c(Intensity_MeanIntensity_FOXJ1, FOXJ1_scaled),
+    values_to = "Intensity",
+    names_to = "Correction"
+  ) %>%
+  mutate(Correction = recode(Correction, Intensity_MeanIntensity_FOXJ1 = "Mean intensity", FOXJ1_scaled = "Normalised intensity")) %>%
+  ggplot(aes(x = Intensity, fill = Sample)) +
+  geom_density(alpha = 0.5) +
+  facet_grid2(Correction ~ Condition, scales = "free", independent = "all") +
+  labs(
+    title = "Nuclear FOXJ1 intensities",
+    x = "Nuclear FOXJ1 intensity or ratio",
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank()
+  ) +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "Normalising effects.png"), width = plot_width, height = plot_height)
+
+# Plot of nuclear DRAQ5 intensities
+# Put some data together
+bind_rows(
+  merge(read.csv(paste0(input_dir, Ecad_FOXJ1_nuclei_file)), annotations),
+  merge(read.csv(paste0(input_dir, p53_FOXJ1_nuclei_file)), annotations),
+  merge(read.csv(paste0(input_dir, p53_p63_nuclei_file)), annotations),
+  merge(read.csv(paste0(input_dir, SCGB1A1_p63_nuclei_file)), annotations),
+  merge(read.csv(paste0(input_dir, SCGB1A1_MUC5AC_nuclei_file)), annotations)
+) %>% # Select required columns
+  dplyr::select(
+    Sample, Donor, Condition, Negative_control,
+    Intensity_MeanIntensity_DRAQ5, Experiment
+  ) %>%
+  ggplot(aes(x = Intensity_MeanIntensity_DRAQ5, fill = Sample)) +
+  geom_density(alpha = 0.5) +
+  facet_grid(Negative_control ~ Experiment) +
+  labs(
+    title = "Nuclear DRAQ5 intensities",
+    x = "Mean nuclear DRAQ5 intensity",
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank()
+  ) +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "DRAQ5 density.png"), width = plot_width, height = plot_height)
+```
+
+## p63 proportions
+Plot of combined p63 slides
+```{r p63 intensities}
+# Make summaries
+p63_summary <- nuclei_data %>%
+  filter(Negative_control == FALSE) %>%
+  group_by(Donor, Condition) %>%
+  summarize(
+    p63_mean = mean(p63_scaled, na.rm = TRUE),
+    p63_prop = mean(p63_scaled > p63_threshold, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Perform paired t-tests with proportion of positive cells
+p63_test_prop <- t.test(
+  filter(p63_summary, Condition == "Control")$p63_prop,
+  filter(p63_summary, Condition == "p53 KD")$p63_prop,
+  paired = TRUE
+)
+interpret_t_test(p63_test_prop, p63_summary, "p63_prop")
+
+# Print range of p63 positive proportion
+range(p63_summary$p63_prop)
+
+# Density plot of nuclear p63 intensity
+nuclei_data %>%
+  filter(Negative_control == FALSE) %>%
+  ggplot(aes(x = p63_scaled, fill = Sample)) +
+  geom_density(alpha = 0.5) +
+  geom_vline(xintercept = p63_threshold, colour = "red") +
+  facet_wrap("Condition") +
+  labs(
+    title = "Nuclear p63 intensity distribution",
+    x = "Normalised nuclear p63 intensity",
+    y = NULL
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "p63 intensity distribution.png"), width = plot_width, height = plot_height)
+
+# Bar plot of proportion p63 positive nuclei
+nuclei_data %>%
+  filter(Negative_control == FALSE) %>%
+  group_by(Donor, Condition, Sample) %>%
+  summarise(
+    `Proportion positive` = mean(p63_scaled > p63_threshold, na.rm = TRUE)
+  ) %>%
+  ggplot(aes(x = Condition, y = `Proportion positive`, fill = Sample)) +
+  geom_col() +
+  geom_hline(yintercept = basal_prop, col = "red") +
+  facet_wrap("Donor") +
+  scale_y_continuous(
+    labels = function(x) paste0(x * 100, "%")
+  ) +
+  labs(
+    title = "Proportion of p63 positive nuclei",
+    subtitle = paste0(
+      "p-value: ",
+      round(p63_test_prop$p.value, digits = 3)
+    ),
+    x = NULL,
+    y = "p63 positive nuclei"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "p63 proportion positive nuclei.png"), width = plot_width, height = plot_height)
+```
+
+## p53 p63
+Interesting observation of mutually exclusive p53/p63 expression - supports idea of p53 driving differentiation.
+```{r p53/p63 intensities}
+# Scatter plot of p53 vs p63 intensities
+nuclei_data %>%
+  filter(Negative_control == FALSE) %>%
+  ggplot(aes(x = p53_scaled, y = p63_scaled, colour = Sample)) +
+  geom_point(alpha = 0.3) +
+  facet_grid(Condition ~ Donor) +
+  labs(
+    title = "Nuclear p53/p63 intensities",
+    x = "Normalised nuclear p53 intensity",
+    y = "Normalised nuclear p63 intensity"
+  ) +
+  theme_bw() +
+  scale_colour_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "p53 p63 nuclear intensities.png"), width = plot_width, height = plot_height)
+```
+
+## SCGB1A1 expression
+```{r SCGB1A1}
+# Density plot of SCGB1A1 intensities
+cells_data %>%
+  filter(Negative_control == FALSE) %>%
+  ggplot(aes(x = SCGB1A1_scaled, fill = Sample)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap("Condition") +
+  labs(
+    title = "Cellular SCGB1A1 intensities",
+    x = "Normalised cellular SCGB1A1 intensity",
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "SCGB1A1 intensity distribution.png"), width = plot_width, height = plot_height)
+```
+
+## SCGB1A1 quartile comparison
+```{r}
+# Summarise the quartiles
+SCGB1A1_quartiles <- cells_data %>%
+    filter(Negative_control == FALSE & eGFP_quartile != "Middle") %>%
+    group_by(Donor, Condition, eGFP_quartile) %>%
+    summarise(
+        SCGB1A1_scaled = mean(SCGB1A1_scaled, na.rm = TRUE)
+    ) %>%
+    pivot_wider(names_from = eGFP_quartile, values_from = SCGB1A1_scaled) %>%
+    mutate(Ratio = Upper / Lower)
+
+# Run paired t-test
+SCGB1A1_ratio_t_result <- t.test(
+    filter(SCGB1A1_quartiles, Condition == "Control")$Ratio,
+    filter(SCGB1A1_quartiles, Condition == "p53 KD")$Ratio,
+    paired = TRUE
+)
+SCGB1A1_ratio_p_label <- paste0("p = ", signif(SCGB1A1_ratio_t_result$p.value, 3))
+
+# Plot quartile ratios
+SCGB1A1_quartiles %>%
+    ggplot(aes(x = Condition, y = Ratio, col = Donor, group = Donor)) +
+    geom_point(size = 3) +
+    geom_line(aes(x = as.numeric(Condition), y = Ratio)) +
+    annotate(
+        "text",
+        x = 1.5,
+        y = max(SCGB1A1_quartiles$Ratio) * 1.05,
+        label = SCGB1A1_ratio_p_label,
+        size = 4
+    ) +
+    labs(
+        title = "SCGB1A1 expression differences",
+        x = "Experimental condition",
+        y = "Ratio of SCGB1A1 intensity by eGFP quartile"
+    ) +
+    theme_bw() +
+    scale_color_manual(name = "Donor", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "SCGB1A1_quartile_ratios.png"), width = plot_width, height = plot_height)
+```
+
+## MUC5AC proportions
+```{r MUC5AC intensities}
+# Make summaries
+MUC5AC_summary <- cells_data %>%
+    filter(Negative_control == FALSE) %>%
+    group_by(Donor, Condition) %>%
+    summarize(
+        MUC5AC_mean = mean(MUC5AC_scaled, na.rm = TRUE),
+        MUC5AC_prop = mean(MUC5AC_scaled > MUC5AC_threshold, na.rm = TRUE),
+        .groups = "drop"
+    )
+
+# Perform paired t-tests and print results for corrected ratio values
+MUC5AC_test_mean <- t.test(
+    filter(MUC5AC_summary, Condition == "p53 KD")$MUC5AC_mean,
+    filter(MUC5AC_summary, Condition == "Control")$MUC5AC_mean,
+    paired = TRUE
+)
+interpret_t_test(MUC5AC_test_mean, MUC5AC_summary, "MUC5AC_mean")
+
+# Repeat but with proportion of positive cells rather than corrected ratios
+MUC5AC_test_prop <- t.test(
+    filter(MUC5AC_summary, Condition == "Control")$MUC5AC_prop,
+    filter(MUC5AC_summary, Condition == "p53 KD")$MUC5AC_prop,
+    paired = TRUE
+)
+interpret_t_test(MUC5AC_test_prop, MUC5AC_summary, "MUC5AC_prop")
+
+# Print range of MUC5AC positive proportion
+range(MUC5AC_summary$MUC5AC_prop)
+
+# Density plot of cellular MUC5AC intensity
+cells_data %>%
+    filter(Negative_control == FALSE) %>%
+    ggplot(aes(x = MUC5AC_scaled, fill = Sample)) +
+    geom_density(alpha = 0.5) +
+    geom_vline(xintercept = MUC5AC_threshold, colour = "red") +
+    facet_wrap("Condition") +
+    labs(
+        title = "Cellular MUC5AC intensity distribution",
+        x = "Normalised cellular MUC5AC intensity",
+        y = NULL
+    ) +
+    theme_bw() +
+    scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "MUC5AC intensity distribution.png"), width = plot_width, height = plot_height)
+
+# Bar plot of proportion MUC5AC positive cells
+cells_data %>%
+    filter(Negative_control == FALSE) %>%
+    group_by(Donor, Condition, Sample) %>%
+    summarise(
+        `Proportion positive` = mean(MUC5AC_scaled > MUC5AC_threshold, na.rm = TRUE)
+    ) %>%
+    ggplot(aes(x = Condition, y = `Proportion positive`, fill = Sample)) +
+    geom_col() +
+    geom_hline(yintercept = goblet_prop, col = "red") +
+    facet_wrap("Donor") +
+    scale_y_continuous(
+        labels = function(x) paste0(x * 100, "%")
+    ) +
+    labs(
+        title = "Proportion of MUC5AC positive cells",
+        subtitle = paste0(
+            "p-value: ",
+            round(MUC5AC_test_prop$p.value, digits = 3)
+        ),
+        x = NULL,
+        y = "MUC5AC positive cells"
+    ) +
+    theme_bw() +
+    scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "MUC5AC proportion positive cells.png"), width = plot_width, height = plot_height)
+```
+
+## FOXJ1 proportions
+Plot of combined FOXJ1 slides
+```{r FOXJ1 intensities}
+# Make summaries
+FOXJ1_summary <- nuclei_data %>%
+    filter(Negative_control == FALSE) %>%
+    group_by(Donor, Condition) %>%
+    summarize(
+        FOXJ1_mean = mean(FOXJ1_scaled, na.rm = TRUE),
+        FOXJ1_prop = mean(FOXJ1_scaled > FOXJ1_threshold, na.rm = TRUE),
+        .groups = "drop"
+    )
+
+# Perform paired t-tests with proportion of positive cells
+FOXJ1_test_prop <- t.test(
+    filter(FOXJ1_summary, Condition == "Control")$FOXJ1_prop,
+    filter(FOXJ1_summary, Condition == "p53 KD")$FOXJ1_prop,
+    paired = TRUE
+)
+interpret_t_test(FOXJ1_test_prop, FOXJ1_summary, "FOXJ1_prop")
+
+# Print range of FOXJ1 positive proportion
+range(FOXJ1_summary$FOXJ1_prop)
+
+# Density plot of nuclear FOXJ1 intensity
+nuclei_data %>%
+    filter(Negative_control == FALSE) %>%
+    ggplot(aes(x = FOXJ1_scaled, fill = Sample)) +
+    geom_density(alpha = 0.5) +
+    geom_vline(xintercept = FOXJ1_threshold, colour = "red") +
+    facet_wrap("Condition") +
+    labs(
+        title = "Nuclear FOXJ1 intensity distribution",
+        x = "Normalised nuclear FOXJ1 intensity",
+        y = NULL
+    ) +
+    theme_bw() +
+    scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "FOXJ1 intensity distribution.png"), width = plot_width, height = plot_height)
+
+# Bar plot of proportion FOXJ1 positive nuclei
+nuclei_data %>%
+    filter(Negative_control == FALSE) %>%
+    group_by(Donor, Condition, Sample) %>%
+    summarise(
+        `Proportion positive` = mean(FOXJ1_scaled > FOXJ1_threshold, na.rm = TRUE)
+    ) %>%
+    ggplot(aes(x = Condition, y = `Proportion positive`, fill = Sample)) +
+    geom_col() +
+    geom_hline(yintercept = ciliated_prop, col = "red") +
+    facet_wrap("Donor") +
+    scale_y_continuous(
+        labels = function(x) paste0(x * 100, "%")
+    ) +
+    labs(
+        title = "Proportion of FOXJ1 positive nuclei",
+        subtitle = paste0(
+            "p-value: ",
+            round(FOXJ1_test_prop$p.value, digits = 3)
+        ),
+        x = NULL,
+        y = "FOXJ1 positive nuclei"
+    ) +
+    theme_bw() +
+    scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "FOXJ1 proportion positive nuclei.png"), width = plot_width, height = plot_height)
+```
+
+## Ecadherin expression
+```{r Ecadherin}
+# Density plot of Ecadherin intensities
+membranes_data %>%
+    filter(Negative_control == FALSE) %>%
+    ggplot(aes(x = Ecadherin_scaled, fill = Sample)) +
+    geom_density(alpha = 0.5) +
+    facet_wrap("Condition") +
+    labs(
+        title = "Membranous E-cadherin intensities",
+        x = "Normalised membranous E-cadherin intensity",
+        y = NULL
+    ) +
+    theme_bw() +
+    theme(
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    ) +
+    scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "Ecadherin intensity distribution.png"), width = plot_width, height = plot_height)
+```
+
+## Ecadherin quartile comparison
+```{r}
+# Summarise the quartiles
+Ecadherin_quartiles <- membranes_data %>%
+    filter(Negative_control == FALSE & eGFP_quartile != "Middle") %>%
+    group_by(Donor, Condition, eGFP_quartile) %>%
+    summarise(
+        Ecadherin_scaled = mean(Ecadherin_scaled, na.rm = TRUE)
+    ) %>%
+    pivot_wider(names_from = eGFP_quartile, values_from = Ecadherin_scaled) %>%
+    mutate(Ratio = Upper / Lower)
+
+# Run paired t-test
+Ecadherin_ratio_t_result <- t.test(
+    filter(Ecadherin_quartiles, Condition == "Control")$Ratio,
+    filter(Ecadherin_quartiles, Condition == "p53 KD")$Ratio,
+    paired = TRUE
+)
+Ecadherin_ratio_p_label <- paste0("p = ", signif(Ecadherin_ratio_t_result$p.value, 3))
+
+# Plot quartile ratios
+Ecadherin_quartiles %>%
+    ggplot(aes(x = Condition, y = Ratio, col = Donor, group = Donor)) +
+    geom_point(size = 3) +
+    geom_line(aes(x = as.numeric(Condition), y = Ratio)) +
+    annotate(
+        "text",
+        x = 1.5,
+        y = max(Ecadherin_quartiles$Ratio) * 1.05,
+        label = Ecadherin_ratio_p_label,
+        size = 4
+    ) +
+    labs(
+        title = "E-cadherin expression differences",
+        x = "Experimental condition",
+        y = "Ratio of E-cadherin intensity by eGFP quartile"
+    ) +
+    theme_bw() +
+    scale_color_manual(name = "Donor", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "Ecadherin_quartile_ratios.png"), width = plot_width, height = plot_height)
+```
+
+## Epithelial density
+Overall density as measured by nuclear counts per field of view
+```{r epithelial density}
+# Make summaries
+density_data <- nuclei_data %>%
+  group_by(Sample, Donor, Condition, Experiment) %>%
+  summarise(nuclei_count = n()) %>%
+  mutate(nuclei_count = nuclei_count/image_area)
+
+density_summary <- density_data %>%
+  group_by(Donor, Condition) %>%
+  summarize(nuclei_count_mean = mean(nuclei_count), .groups = "drop")
+
+# Perform paired t-tests and print results
+density_test <- t.test(
+  filter(density_summary, Condition == "Control")$nuclei_count_mean,
+  filter(density_summary, Condition == "p53 KD")$nuclei_count_mean,
+  paired = TRUE
+)
+interpret_t_test(density_test, density_summary, "nuclei_count_mean")
+
+# Make a box-plot
+density_data %>%
+  ggplot(aes(x = Donor, y = nuclei_count, fill = Sample)) +
+  geom_boxplot() +
+  labs(
+    title = "Cell density",
+    subtitle = paste0("p-value = ", round(density_test$p.value, digits = 3)),
+    x = "Donor",
+    y = expression("Nuclei count per mm"^2)
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "Epithelial_density_boxplot.png"), width = plot_width, height = plot_height)
+```
+
+# OLD CODE
+
+## Cell count totals
+Add up the proportions from the other cell type counts.
+```{r}
+# Merge the datasets together
+overall_summary <- merge(
+  FOXJ1_summary,
+  p63_summary,
+  by = c("Donor", "Condition")
+) %>%
+  merge(
+    MUC5AC_summary,
+    by = c("Donor", "Condition")
+  ) %>%
+  mutate(
+    total_prop = (FOXJ1_prop + p63_prop + MUC5AC_prop)
+  )
+
+# Run some stats
+total_test_prop <- t.test(
+  filter(overall_summary, Condition == "Control")$total_prop,
+  filter(overall_summary, Condition == "p53 KD")$total_prop,
+  paired = TRUE
+)
+interpret_t_test(total_test_prop, overall_summary, "total_prop")
+```
+
+## p53
+Plot of combined p53 slides
+```{r p53 intensities}
+# Run some stats
+# Make summaries
+p53_summary <- nuclei_data %>%
+  filter(Negative_control == FALSE) %>%
+  group_by(Donor, Condition) %>%
+  summarize(
+    p53_mean = mean(p53_scaled, na.rm = TRUE),
+    p53_prop = mean(p53_scaled > p53_threshold, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Perform paired t-tests and print results for corrected ratio values
+p53_test_mean <- t.test(
+  filter(p53_summary, Condition == "Control")$p53_mean,
+  filter(p53_summary, Condition == "p53 KD")$p53_mean,
+  paired = TRUE
+)
+interpret_t_test(p53_test_mean, p53_summary, "p53_mean")
+
+# Repeat but with proportion of positive cells rather than corrected ratios
+p53_test_prop <- t.test(
+  filter(p53_summary, Condition == "Control")$p53_prop,
+  filter(p53_summary, Condition == "p53 KD")$p53_prop,
+  paired = TRUE
+)
+interpret_t_test(p53_test_prop, p53_summary, "p53_prop")
+
+# Density plot of nuclear FOXJ1 intensity
+nuclei_data %>%
+  filter(Negative_control == FALSE) %>% # Remove negative control results
+  ggplot(aes(x = p53_scaled, fill = Sample)) +
+  geom_density(alpha = 0.5) +
+  geom_vline(xintercept = p53_threshold, colour = "red") +
+  facet_wrap("Condition") +
+  labs(
+    title = "Nuclear p53 intensities",
+    subtitle = paste0(
+      "Mean difference: ",
+      round(p53_test_mean$estimate, digits = 3),
+      ", p-value: ",
+      round(p53_test_mean$p.value, digits = 3)
+    ),
+    x = "Nuclear p53 intensity relative to DRAQ5",
+    y = NULL
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "p53 relative nuclear intensities.png"), width = plot_width, height = plot_height)
+
+# Bar plot of proportion FOXJ1 positive nuclei
+nuclei_data %>%
+  group_by(Donor, Condition, Sample) %>%
+  summarise(
+    `Proportion positive` = mean(p53_ratio_corrected > p53_threshold, na.rm = TRUE)
+  ) %>%
+  ggplot(aes(x = Condition, y = `Proportion positive`, fill = Sample)) +
+  geom_col() +
+  facet_wrap("Donor") +
+  labs(
+    title = "Proportion of p53 positive nuclei",
+    subtitle = paste0(
+      "Mean difference: ",
+      round(p53_test_prop$estimate, digits = 3),
+      ", p-value: ",
+      round(p53_test_prop$p.value, digits = 3)
+    ),
+    x = NULL,
+    y = "p53 positive nuclei"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "p53 proportion positive nuclei.png"), width = plot_width, height = plot_height)
+```
+
+## eGFP
+Plot of combined eGFP slides
+```{r eGFP intensities}
+# Run some stats
+# Make summaries
+eGFP_summary <- nuclei_data %>%
+  group_by(Donor, Condition) %>%
+  summarize(
+    eGFP_mean = mean(eGFP_ratio_corrected, na.rm = TRUE),
+    eGFP_prop = mean(eGFP_ratio_corrected > eGFP_threshold, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Perform paired t-tests and print results for corrected ratio values
+eGFP_test_mean <- t.test(
+  filter(eGFP_summary, Condition == "Control")$eGFP_mean,
+  filter(eGFP_summary, Condition == "p53 KD")$eGFP_mean,
+  paired = TRUE
+)
+interpret_t_test(eGFP_test_mean, eGFP_summary, "eGFP_mean")
+
+# Repeat but with proportion of positive cells rather than corrected ratios
+eGFP_test_prop <- t.test(
+  filter(eGFP_summary, Condition == "Control")$eGFP_prop,
+  filter(eGFP_summary, Condition == "p53 KD")$eGFP_prop,
+  paired = TRUE
+)
+interpret_t_test(eGFP_test_prop, eGFP_summary, "eGFP_prop")
+
+# Density plot of nuclear FOXJ1 intensity
+nuclei_data %>%
+  filter(Negative_control == FALSE) %>% # Remove negative control results
+  ggplot(aes(x = eGFP_ratio_corrected, fill = Sample)) +
+  geom_density(alpha = 0.5) +
+  geom_vline(xintercept = eGFP_threshold, colour = "red") +
+  facet_wrap("Condition") +
+  labs(
+    title = "Nuclear eGFP intensities",
+    subtitle = paste0(
+      "Mean difference: ",
+      round(eGFP_test_prop$estimate, digits = 3),
+      ", p-value: ",
+      round(eGFP_test_prop$p.value, digits = 3)
+    ),
+    x = "Nuclear eGFP intensity relative to DRAQ5",
+    y = NULL
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "eGFP relative nuclear intensities.png"), width = plot_width, height = plot_height)
+
+# Bar plot of proportion FOXJ1 positive nuclei
+nuclei_data %>%
+  group_by(Donor, Condition, Sample) %>%
+  summarise(
+    `Proportion positive` = mean(eGFP_ratio_corrected > eGFP_threshold, na.rm = TRUE)
+  ) %>%
+  ggplot(aes(x = Condition, y = `Proportion positive`, fill = Sample)) +
+  geom_col() +
+  facet_wrap("Donor") +
+  labs(
+    title = "Proportion of eGFP positive nuclei",
+    subtitle = paste0(
+      "Mean difference: ",
+      round(eGFP_test_prop$estimate, digits = 3),
+      ", p-value: ",
+      round(eGFP_test_prop$p.value, digits = 3)
+    ),
+    x = NULL,
+    y = "eGFP positive nuclei"
+  ) +
+  theme_bw() +
+  scale_fill_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "eGFP proportion positive nuclei.png"), width = plot_width, height = plot_height)
+```
+
+## p53 eGFP
+Scatter plot of p53 vs eGFP expression
+```{r p53 eGFP}
+# Scatter plot of nuclear p53 vs nuclear eGFP intensities.
+nuclei_data %>%
+  filter(Negative_control == FALSE) %>% # Remove negative control results
+  ggplot(aes(x = p53_ratio_corrected, y = eGFP_ratio_corrected, colour = Sample)) +
+  geom_point(alpha = 0.3) +
+  facet_grid(Condition ~ Donor) +
+  labs(
+    title = "Mean nuclear p53/eGFP intensities",
+    x = "Corrected nuclear p53 ratio relative to DRAQ5",
+    y = "Corrected nuclear eGFP ratio relative to DRAQ5"
+  ) +
+  theme_bw() +
+  scale_colour_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "p53 eGFP nuclear intensities.png"), width = plot_width, height = plot_height)
+```
+
+## SCGB1A1 p63
+SCGB1A1 also seems to be somewhat mutually exclusive, demonstrating distiniction of club cell population from basal cell population. The loading of this data may need to be edited to compare nuclear p63 with cellular SCGB1A1 of cytoplasmic SCGB1A1.
+```{r SCGB1A1/p63 intensities}
+# Scatter plot of nuclear p63 vs nuclear SCGB1A1 intensities.
+bind_cols(
+  filter(nuclei_data, Experiment == "SCGB1A1 p63"),
+  SCGB1A1_corrected = filter(cells_data, Experiment == "SCGB1A1 p63")$SCGB1A1_corrected
+) %>%
+  ggplot(aes(x = p63_ratio_corrected, y = SCGB1A1_corrected, colour = Sample)) +
+  geom_point(alpha = 0.3) +
+  facet_grid(Condition ~ Donor) +
+  labs(
+    title = "Mean nuclear SCGB1A1/p63 intensities",
+    x = "Nuclear p63 intensity relative to DRAQ5",
+    y = "Nuclear SCGB1A1 intensity relative to DRAQ5"
+  ) +
+  theme_bw() +
+  scale_colour_manual(name = "Sample", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "SCGB1A1 p63 nuclear intensities.png"), width = plot_width, height = plot_height)
+```
+
+## SCGB1A1 MUC5AC
+```{r SCGB1A1 MUC5AC}
+# Plot of cellular SCGB1A1 and MUC5AC intensity
+cells_data %>% # normalise against DRAQ5 intensity
+  ggplot(aes(x = SCGB1A1_corrected, y = MUC5AC_corrected, colour = Sample)) +
+  geom_point(alpha = 0.3) +
+  facet_grid(Condition ~ Donor) +
+  labs(
+    title = "Mean cellular SCGB1A1/MUC5AC intensities",
+    x = "Mean cellular SCGB1A1 intensity",
+    y = "Mean cellular MUC5AC intensity"
+  ) +
+  theme_bw() +
+  scale_colour_manual(name = "Sample", values = custom_colours) +
+  theme(
+    legend.position = "none"
+  )
+
+# Save the plot
+ggsave(paste0(output_dir, "SCGB1A1 MUC5AC cellular intensities.png"), width = plot_width, height = plot_height)
+```
+
+# Quartile comparisons
+## p63 quartile comparison
+```{r}
+# Summarise the quartiles
+p63_quartiles <- nuclei_data %>%
+  filter(Negative_control == FALSE & eGFP_quartile != "Middle") %>%
+  group_by(Donor, Condition, eGFP_quartile) %>%
+  summarise(
+    p63_scaled = mean(p63_scaled, na.rm = TRUE)
+  ) %>%
+  pivot_wider(names_from = eGFP_quartile, values_from = p63_scaled) %>%
+  mutate(Ratio = Upper / Lower)
+
+# Run paired t-test
+FOXJ1_ratio_t_result <- t.test(
+  filter(FOXJ1_quartiles, Condition == "Control")$Ratio,
+  filter(FOXJ1_quartiles, Condition == "p53 KD")$Ratio,
+  paired = TRUE
+)
+FOXJ1_ratio_p_label <- paste0("p = ", signif(FOXJ1_ratio_t_result$p.value, 3))
+
+# Plot quartile ratios
+FOXJ1_quartiles %>%
+  ggplot(aes(x = Condition, y = Ratio, col = Donor, group = Donor)) +
+  geom_point(size = 3) +
+  geom_line(aes(x = as.numeric(Condition), y = Ratio)) +
+  annotate(
+    "text",
+    x = 1.5,
+    y = max(FOXJ1_quartiles$Ratio) * 1.05,
+    label = FOXJ1_ratio_p_label,
+    size = 4
+  ) +
+  labs(
+    title = "FOXJ1 expression differences",
+    x = "Experimental condition",
+    y = "Ratio of FOXJ1 intensity by eGFP quartile"
+  ) +
+  theme_bw() +
+  scale_color_manual(name = "Donor", values = custom_colours)
+
+# Save the plot
+ggsave(paste0(output_dir, "FOXJ1_quartile_ratios.png"), width = plot_width, height = plot_height)
+```

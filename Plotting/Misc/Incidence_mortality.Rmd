@@ -1,0 +1,279 @@
+---
+title: "Incidence and mortality"
+author: "Sam Siljee"
+date: "2026-01-06"
+output: html_document
+---
+
+Code for figure 1 in the introduction - incidence and mortality for lung cancer in New Zealand
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load libraries
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(survminer) # Kaplan-Meier plots
+library(survival) # Survival analysis
+
+# Set directories
+input_dir <- paste0(getwd(), "/data/")
+output_dir <- paste0(getwd(), "/../produced_plots/Incidence_mortality/")
+excel_summary <- "cancer-historical-summary-1948-2017_final.xlsx"
+reload_TCGA_data <- FALSE
+COSMIC_file <- "Census_allFri Jan 16 03_06_32 2026.csv"
+```
+
+# Load and reshape NZ cancer stats data
+```{r Load and reshape the data}
+# Sheets to read in
+sheets_to_read <- paste(rep(c("Regs", "Deaths"), each = 3), c("Total", "Male", "Female"), sep = "_")
+
+# Initialise dataframe
+cancer_data <- data.frame()
+
+for (i in sheets_to_read) {
+  # Read in data
+  dat <- read_xlsx(paste0(input_dir, excel_summary), sheet = i, trim_ws = TRUE)
+
+  # Get list of cancers for new column names
+  cancer_names <- dat[3, ] %>%
+    unlist() %>%
+    na.omit()
+
+  # Separate data by metric, convert to numeric, and add extra columns
+  count_dat <- dat[dat[4, ] %in% c("Year", "No.")] %>%
+    mutate_all(as.numeric) %>%
+    mutate(Metric = "Count")
+  rate_dat <- dat[dat[4, ] %in% c("Year", "Rate")] %>%
+    mutate_all(as.numeric) %>%
+    mutate(Metric = "Rate")
+
+  # Combine datasets again
+  dat <- bind_rows(count_dat, rate_dat)
+
+  # Correct column names
+  colnames(dat) <- c("Year", cancer_names, "Metric")
+
+  # Add sheet column, filter out innapropriate rows, and add to dataset
+  cancer_data <- bind_rows(
+    cancer_data,
+    filter(mutate(dat, Sheet = i), !is.na(Year))
+  )
+}
+
+# Pivot from wide format to long format
+cancer_data <- cancer_data %>%
+  pivot_longer(
+    col = -c("Year", "Metric", "Sheet"),
+    names_to = "Cancer_type",
+    values_to = "Value"
+  ) %>%
+  mutate(Cancer_type = as.factor(sub(" \\(C.*", "", Cancer_type)))
+```
+
+# Incidence plot
+```{r Incidence plot}
+cancer_data %>%
+  filter(
+    Sheet == "Regs_Total" &
+      Year == 2017 &
+      Metric == "Rate" &
+      !is.na(Value) &
+      Cancer_type != "All cancers"
+  ) %>%
+  ggplot(aes(x = reorder(Cancer_type, -Value), y = Value, fill = Cancer_type == "Lung & Trachea")) +
+  geom_col() +
+  labs(
+    title = "New Zealand cancer incidence rates, 2017",
+    x = "Cancer type",
+    y = "Age corrected cancer registration rate"
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c("grey", "red")) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    axis.title.x = element_blank(),
+    legend.position = "none"
+  )
+
+# Save plot
+ggsave(paste0(output_dir, "2017 Cancer incidence.png"), width = 8, height = 5.5)
+```
+
+# Mortality plot
+```{r Incidence plot}
+cancer_data %>%
+  filter(
+    Sheet == "Deaths_Total" &
+      Year == 2017 &
+      Metric == "Rate" &
+      !is.na(Value) &
+      Cancer_type != "All cancers"
+  ) %>%
+  ggplot(aes(x = reorder(Cancer_type, -Value), y = Value, fill = Cancer_type == "Lung & Trachea")) +
+  geom_col() +
+  labs(
+    title = "New Zealand cancer mortality rates, 2017",
+    x = "Cancer type",
+    y = "Age corrected cancer mortality rate"
+  ) +
+  theme_bw() +
+  scale_fill_manual(values = c("grey", "red")) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    axis.title.x = element_blank(),
+    legend.position = "none"
+  )
+
+# Save plot
+ggsave(paste0(output_dir, "2017 Cancer mortality.png"), width = 8, height = 5.5)
+```
+
+# Load TCGA data
+Code to load clinical data and TP53 expression (RNA seq) data from TCGA
+```{r TCGA data}
+# Load fresh form TCGA if selected, otherwise load from .rda file
+if (reload_TCGA_data) {
+  # Load required libraries
+  library(TCGAbiolinks) # Download TCGA data
+  library(SummarizedExperiment) # Manage RNA count data
+  library(DESeq2) # VST of count matrix
+  library(tibble) # For rownames_to_column function
+
+  # Download clinical data for lung squamous cell carcinoma patients
+  LUSC_clin <- GDCquery_clinic("TCGA-LUSC", "clinical")
+
+  # Select appropriate columns and make new ones
+  clin_data <- LUSC_clin %>%
+    select(submitter_id, vital_status, days_to_last_follow_up, days_to_death) %>%
+    mutate(
+      deceased = ifelse(vital_status == "Alive", FALSE, TRUE),
+      overall_survival = ifelse(vital_status == "Alive", days_to_last_follow_up, days_to_death)
+    )
+
+  # Query to get gene expression data
+  LUSC_gene_query <- GDCquery(
+    project = "TCGA-LUSC",
+    data.category = "Transcriptome Profiling",
+    experimental.strategy = "RNA-Seq",
+    workflow.type = "STAR - Counts",
+    data.type = "Gene Expression Quantification",
+    sample.type = "Primary Tumor",
+    access = "open"
+  )
+
+  # Download the RNA seq data
+  GDCdownload(LUSC_gene_query)
+
+  # Extract count data and prepare count matrix
+  LUSC_counts <- GDCprepare(LUSC_gene_query, summarizedExperiment = TRUE)
+  LUSC_matrix <- assay(LUSC_counts, "unstranded")
+
+  # extract gene and sample metadata from summarizedExperiment object
+  gene_metadata <- as.data.frame(rowData(LUSC_counts))
+  coldata <- as.data.frame(colData(LUSC_counts))
+
+  # vst transform counts to be used in survival analysis
+  # Setting up countData object
+  dds <- DESeqDataSetFromMatrix(
+    countData = LUSC_matrix,
+    colData = coldata,
+    design = ~1
+  )
+
+  # Removing genes with sum total of 10 reads across all samples
+  dds <- dds[(rowSums(counts(dds)) >= 10), ]
+
+  # vst
+  vsd <- vst(dds, blind = FALSE)
+  LUSC_matrix_vst <- assay(vsd)
+
+  # Get data for TP53 gene and add gene metadata information to it
+  LUSC_TP53 <- LUSC_matrix_vst %>%
+    as.data.frame() %>%
+    rownames_to_column(var = "gene_id") %>%
+    gather(key = "case_id", value = "counts", -gene_id) %>%
+    left_join(., gene_metadata, by = "gene_id") %>%
+    filter(gene_name == "TP53")
+
+  # get median value
+  median_value <- median(LUSC_TP53$counts)
+
+  # Denote which cases have higher or lower expression than median count
+  LUSC_TP53$TP53_Expression <- ifelse(LUSC_TP53$counts >= median_value, "High", "Low")
+
+  # Add clinical information
+  LUSC_TP53$case_id <- gsub("-01.*", "", LUSC_TP53$case_id)
+  LUSC_TP53 <- merge(LUSC_TP53, clin_data, by.x = "case_id", by.y = "submitter_id")
+
+  # Save the data
+  save(LUSC_TP53, file = paste0(input_dir, "LUSC_TP53.Rdata"))
+} else {
+  load(file = paste0(input_dir, "LUSC_TP53.Rdata"))
+}
+```
+
+# Kaplan-Meier plots
+Make Kaplan-Meier plots from TCGA data, split by TP53 expression
+```{r}
+# Change TP53 survival from days to years
+LUSC_TP53$overall_survival_years <- LUSC_TP53$overall_survival / 365
+
+# fitting survival curve
+fit <- survfit(Surv(overall_survival_years, deceased) ~ TP53_Expression, data = LUSC_TP53)
+fit
+
+ggsurvplot(fit,
+  data = LUSC_TP53,
+  pval = TRUE,
+  risk.table = FALSE,
+  title = "Overall survival by TP53 expression (RNA seq)",
+  xlab = "Survival time (years)",
+  legend = "right",
+  legend.title = "TP53 expression",
+  legend.labs = c("High", "Low")
+)
+
+# Save plot
+ggsave(paste0(output_dir, "Kaplan-Meier by TP53.png"), width = 8, height = 5.5)
+```
+
+# Driver gene count
+Load COSMIC data to get information on driver mutations.
+Data sourced here: https://cancer.sanger.ac.uk/census
+Due to messy dataset, there's no way I can see to separate LSCC from other lung cancer types
+```{r Driver gene count}
+# Load COSMIC data
+COSMIC_data <- read.csv(paste0(input_dir, COSMIC_file))
+
+# Get list of tissue types
+COSMIC_types <- unique(COSMIC_data$Tumour.Types.Somatic.)
+
+# Filter to lung cancer types - include all
+lung_types <- grep(pattern = "lung|SCLC", COSMIC_types, value = TRUE)
+
+# Filter data
+COSMIC_filtered <- COSMIC_data %>%
+  filter(Tumour.Types.Somatic. %in% lung_types)
+
+# Count overall driver mutations
+nrow(COSMIC_filtered)
+
+# Count hallmark genes
+sum(COSMIC_filtered$Hallmark == "Yes")
+
+# Select columns and export for use in introduction chapter table
+COSMIC_filtered %>%
+  filter(Hallmark == "Yes") %>%
+  select(
+    Gene.Symbol,
+    Name,
+    Mutation.Types,
+    Tumour.Types.Somatic.,
+    Role.in.Cancer
+  ) %>%
+  write.csv(paste0(output_dir, "COSMIC_summary.csv"), row.names = FALSE)
+```
