@@ -1,0 +1,225 @@
+# Script to process images and analyse them for apical fluid volume
+# Sam Siljee
+# 6th September 2024
+
+---
+title: "Apical fluid analysis"
+author: "Sam Siljee"
+date: '2022-09-06'
+output: html_document
+---
+
+Note that I've had to change two intensity threshold values for the pre-wash 4x data. These values caused convergence to fail when fitting the sigmoid function to the fail to converge.
+The values I've changed are
+21-052_1_270 from 297 to 273
+and
+22-069_6_270 from 362 to 337
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages
+library(dplyr) # Data manipulation
+library(ggplot2) # Plotting
+library(stringr) # String manipulation in annotations
+library(tiff) # Read in .tiff files
+library(png) # Write .png images
+library(drc) # For 4PL model
+
+# Files and directories
+input_dir <- paste0(getwd(), "/data/")
+output_dir <- paste0(getwd(), "/results/")
+
+# User variables
+min_offset <- -90
+max_offset <-5
+magnification <- "4x" # "10X"
+wash <- "pre" # "pre wash"
+
+# Load custom functions
+source("Apical_fluid_analysis_functions.R")
+```
+
+# Apical fluid analysis
+Run main loop processing the data, iterating over each image
+```{r Run processing}
+# List input files filtering using the variables from setup
+input_files <- list.files(input_dir) %>%
+  grep(pattern = ".tif$", value = TRUE) %>%
+  grep(pattern = magnification, value = TRUE) %>%
+  grep(pattern = wash, value = TRUE)
+
+# Create annotations from file names
+annotations <- data.frame(file_name = input_files) %>%
+  mutate(
+    Donor = substr(file_name, start = 1, stop = 6),
+    Well = str_extract(file_name, "(?<=well )\\d(?= )"),
+    Rotation = str_extract(file_name, "(?<= wash )\\d{2,3}(?= well )"),
+    ID = paste(Donor, Well, Rotation, sep = "_"),
+    Condition = ifelse(Well %in% c(1, 2, 3), "Control", "p53 KD")
+  )
+
+# Read in intensity curve cutoffs
+intensity_cutoffs <- read.csv(paste0(input_dir, "curve_cutoffs_", magnification, "_", wash,"_wash.csv"), header = TRUE)
+
+# Initialise list for results
+results <- list()
+
+# Start loop through images
+for (i in 1:nrow(annotations)) {
+  # Set some variables
+  file_name <- annotations$file_name[i]
+  ID <- annotations$ID[i]
+  
+  # Get manual intensity cutoff value
+  intensity_cutoff <- intensity_cutoffs[intensity_cutoffs$ID == ID, 2]
+  
+  # Print progress check
+  print(paste0("Starting on ", ID, ", ", i, " of ", nrow(annotations)))
+
+  # Load the image
+  image_matrix <- readTIFF(paste0(input_dir, file_name), as.is = TRUE)
+
+  # Convert to grey-scale image - sum all channels
+  image_matrix <- image_matrix[, , 1] + image_matrix[, , 2] + image_matrix[, , 3]
+  
+  # Get number of rows for other functions
+  image_height <- nrow(image_matrix)
+
+  # Flip on vertical axis if image taken at 90 degrees position
+  if (annotations$Rotation[i] == 90) {
+    image_matrix <- image_matrix[, ncol(image_matrix):1]
+  }
+
+  # Take the average of the middle fifth as a reference row
+  reference_row <- colMeans(image_matrix[floor(nrow(image_matrix) * 2 / 5):ceiling(nrow(image_matrix) * 3 / 5), ])
+
+  # Run function to estimate best offsets
+  offset_estimates <- get_alignment_offsets(image_matrix, reference_row, min_offset, max_offset)
+  
+  # Run quadratic model to estimate offset curve
+  offset_model <- lm(offset ~ poly(row, 2), data = data.frame(row = 1:image_height, offset = offset_estimates))
+  
+  # Model the offsets
+  offsets <- predict(offset_model, newdata = data.frame(row = 1:image_height))
+  
+  # Plot the offsets
+  rbind(
+    data.frame(
+      Row = 1:image_height,
+      Offset = offset_estimates,
+      Method = "Image alignment"),
+    data.frame(
+      Row = 1:image_height,
+      Offset = offsets,
+      Method = "Quadratic model")
+  ) %>%
+    ggplot(aes(x = Row, y = Offset, col = Method)) +
+    geom_line() +
+    coord_flip() +
+    labs(
+      title = paste("Calcualted offset values for image ", ID),
+      x = "Image row",
+      y = "Row offset value"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+    )
+  
+  # Save the plot
+  ggsave(paste0(output_dir, "offset_plots/", ID, "_offset_plot.png"), width = 8, height = 5.5)
+
+  # Align rows, saving an image of the aligned matrix and make a column means vector
+  aligned_matrix <- align_matrix(image_matrix, -offsets)
+  
+  # Make an image with a red line for the intensity cutoff
+  aligned_image <- array(dim = c(dim(aligned_matrix), 3))
+  aligned_image[,,1:3] <- normalise_image(aligned_matrix) # All three channels the same
+  # Add in red line
+  aligned_image[,(intensity_cutoff - 2) : (intensity_cutoff + 2),1] <- 1
+  aligned_image[,(intensity_cutoff - 2) : (intensity_cutoff + 2),2:3] <- 0
+  
+  # Save as a PNG image - grayscale
+  writePNG(aligned_image, paste0(output_dir, "aligned_images/", ID, "_aligned_image.png"))
+  
+  # Get intensity values
+  intensity_vector <- colMeans(aligned_matrix)
+  
+  # Trim by manual cutoff
+  trimmed_intensity <- intensity_vector[intensity_cutoff:length(intensity_vector)]
+  
+  # Get intensity values for model - including exceptions for pre-wash 4x samples 21-052_1_270 and 22-069_6_270
+  model_trimmed_intensity <- if (magnification == "10x" | wash == "post") {
+    trimmed_intensity
+  } else if (ID == "21-052_1_270") {
+    intensity_vector[273:length(intensity_vector)]
+  } else if (ID == "22-069_6_270") {
+    intensity_vector[337:length(intensity_vector)]
+  } else {
+    trimmed_intensity
+  }
+
+  # Fit 4PL curve model with data trimmed by manual intensity cutoff
+  model_data <- data.frame(
+    Intensity = max(model_trimmed_intensity) - model_trimmed_intensity,
+    Radial_distance = 1:length(model_trimmed_intensity)
+    )
+  
+  fit <- drm(Intensity ~ Radial_distance, data = model_data, fct = LL.3())
+  
+  # Predict concentrations of samples
+  predicted_fit <- predict(fit, newdata = data.frame(Radial_distance = 1:length(trimmed_intensity)))
+  
+  # Calculate intensity cutoff as per Harvey et. al. method - where intensity is at its maximum.
+  Max_intensity_cutoff <- which.min(intensity_vector)
+  
+  # Make a plot of the intensity values
+  data.frame(
+    Radial_distance = 1:length(intensity_vector),
+    Intensity = intensity_vector,
+    Model = c(rep(NA, intensity_cutoff - 1), max(trimmed_intensity) - predicted_fit)
+  ) %>%
+    ggplot(aes(x = Radial_distance, y = Intensity)) +
+    geom_line() +
+    geom_line(aes(x = Radial_distance, y = Model), col = "darkgreen") +
+    geom_vline(xintercept = intensity_cutoff, col = "red") +
+    geom_vline(xintercept = Max_intensity_cutoff, col = "blue") +
+    scale_y_reverse() +
+    labs(
+      title = paste("Aligned column mean intensity:", ID),
+      x = "Radial distance (pixels)",
+      y = "Mean intensity"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+      legend.position = "none"
+    )
+  
+  # Save the plot
+  ggsave(paste0(output_dir, "intensity_plots/", ID, "_intensity_plot.png"), width = 8, height = 5.5)
+
+  # calculate area under the curve according to the 4PL model using numerical integration
+  sigmoid_func <- function(x) {
+    predict(fit, newdata = data.frame(Radial_distance = x))
+  }
+  
+  # Calculate area under curve
+  sigmoid_area <- integrate(sigmoid_func, lower = 0, upper = 2000)
+  
+  # Calculate the area under the curve by adding the intensity values - inverted for greyscale mapping
+  sum_area <- sum(max(trimmed_intensity) - trimmed_intensity)
+  
+  # Add to results list
+  results[[ID]] <- list(
+    "sum_area" = sum_area,
+    "sigmoid_area" = sigmoid_area$value,
+    "sigmoid_model" = fit,
+    "quadratic_model" = offset_model
+  )
+}
+
+# Save the resulting area data
+save(results, file = paste0(output_dir, magnification, "_", wash, "_results.rda"))
+```
