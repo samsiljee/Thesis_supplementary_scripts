@@ -1,3 +1,6 @@
+# Ignore input data
+*/*/data/*
+
 .Rproj.user
 .Rhistory
 .RData
