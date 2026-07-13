@@ -192,11 +192,9 @@ frequency_data %>%
   ggplot(aes(x = Donor, y = Frequency, fill = Sample)) +
   geom_boxplot() + # Use arg "outlier.shape = NA" to remove outlier point plotting
   labs(
-    title = "Filtered pixel frequencies (cilia cluster mask)",
+    #title = "Filtered pixel frequencies (cilia cluster mask)",
     subtitle = paste0(
-      "Mean difference: ",
-      round(freq_t_test$estimate, digits = 3),
-      ", p-value: ",
+      "p-value: ",
       formatC(freq_t_test$p.value, format = "e", digits = 2)
     ),
     x = "Donor",
