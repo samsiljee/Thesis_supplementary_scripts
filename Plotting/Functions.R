@@ -10,12 +10,12 @@ library(biomaRt) # Uniprot/gene ID mappings
 
 # Load custom colour scheme for plotting - make a copy for names without underscores
 custom_colours <- c(
-  read.csv(paste0(input_dir, "..\\..\\colours.csv"))$Colour,
-  read.csv(paste0(input_dir, "..\\..\\colours.csv"))$Colour
+  read.csv(paste0(input_dir, "../../../colours.csv"))$Colour,
+  read.csv(paste0(input_dir, "../../../colours.csv"))$Colour
 )
 names(custom_colours) <- c(
-  read.csv(paste0(input_dir, "..\\..\\colours.csv"))$Name,
-  str_replace(read.csv(paste0(input_dir, "..\\..\\colours.csv"))$Name, "_", " ")
+  read.csv(paste0(input_dir, "../../../colours.csv"))$Name,
+  str_replace(read.csv(paste0(input_dir, "../../../colours.csv"))$Name, "_", " ")
 )
 
 # Function to import the data given a data type key
@@ -64,8 +64,8 @@ map_gene_symbols <- function(string) {
 }
 
 # Get ID mapping
-if (file.exists(paste0(input_dir, "..\\..\\gene_map.csv"))) {
-  gene_map <- read.csv(paste0(input_dir, "..\\..\\gene_map.csv"))
+if (file.exists(paste0(input_dir, "../../../gene_map.csv"))) {
+  gene_map <- read.csv(paste0(input_dir, "../../../gene_map.csv"))
 } else {
   # Set up the connection to the Ensembl database
   ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
@@ -91,7 +91,7 @@ if (file.exists(paste0(input_dir, "..\\..\\gene_map.csv"))) {
   # Save table for future reference
   write.csv(
     gene_map,
-    paste0(input_dir, "..\\..\\gene_map.csv"),
+    paste0(input_dir, "../../../gene_map.csv"),
     row.names = FALSE
   )
 }
@@ -285,7 +285,7 @@ format_for_IPA <- function(dat, uniprot_ids = NULL) {
     merged_dat,
     `First Uniprot ID` = str_split_i(Protein, pattern = ";", i = 1),
     `First gene symbol` = gene_symbols_map$Gene_symbol[match(`First Uniprot ID`, gene_symbols_map$Protein)],
-    `Trimmed first Uniprot ID` = str_remove(`First Uniprot ID`, "-\\d+$"),
+    `Trimmed first Uniprot ID` = str_remove(`First Uniprot ID`, "-/d+$"),
     `Trimmed first gene symbol` = gene_symbols_map$Gene_symbol[match(`Trimmed first Uniprot ID`, gene_symbols_map$Protein)],
     .before = Protein
   )
@@ -302,7 +302,7 @@ read_FASTA_names <- function(FASTA_path) {
   FASTA_lines <- FASTA_lines[grep(">", FASTA_lines)]
   
   # Return extracted Uniprot IDs
-  return(sub("^[^|]*\\|([^|]*)\\|.*", "\\1", FASTA_lines))
+  return(sub("^[^|]*/|([^|]*)/|.*", "/1", FASTA_lines))
 }
 
 # Function to parse modifications string from UniProt query to extract list of modifications
