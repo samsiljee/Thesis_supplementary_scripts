@@ -981,7 +981,7 @@ print("Number of significantly altered kinases:")
 sum(kinase_res$FDR < 0.05)
 
 # Order the kinases by z-score
-kinase_res$Kinase <- factor(kinase_res$Name) %>%
+kinase_res$Kinase <- factor(kinase_res$Gene) %>%
   fct_reorder(kinase_res$ZScore, .desc = TRUE)
 
 # Make a plot
