@@ -1,6 +1,9 @@
 # Ignore input data
 */*/data/*
 
+# Ignore produced plots
+Plotting/produced_plots/*
+
 .Rproj.user
 .Rhistory
 .RData
