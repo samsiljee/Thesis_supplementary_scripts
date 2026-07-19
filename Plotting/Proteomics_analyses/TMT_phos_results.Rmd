@@ -978,7 +978,7 @@ annotations %>%
       ifelse(Smoker == TRUE, "S", "NS"),
       sep = "_"
     ),
-    Group = ifelse(Condition == "pLL3.7", "Case", "Control")
+    Group = ifelse(Condition == "pLL3.7", "Control", "Case")
   ) %>%
   dplyr::select(c(RowName, Group, Condition, Smoker, Sex, BioReplicate)) %>%
   unique() %>%
