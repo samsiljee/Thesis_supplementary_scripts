@@ -917,18 +917,6 @@ Code to format data for RoKAI input, and make plots from output.
 Original paper: 10.1038/s41467-021-21211-6
 For the RokaiXplorer analysis, the configuration is available in the inputs folder
 ```{r Kinase activity inference - RoKAI}
-# Format the data for the online RoKAI tool input - simple method
-MSstatsPTM_raw_results_filtered %>%
-  separate(
-    col = Protein,
-    into = c("Protein", "Position"),
-    sep = "_"
-  ) %>%
-  mutate("Quantification" = log2FC) %>%
-  dplyr::select(c(Protein, Position, Quantification)) %>%
-  filter(!is.na(Protein) & !is.na(Position) & !is.na(Quantification)) %>%
-  write.csv(paste0(output_dir, "RoKAI input.csv"), quote = FALSE, row.names = FALSE)
-
 # For the advanced tool:
 # Raw phosphosite data
 MSstatsPTM_processed_filtered$PTM$ProteinLevelData %>%
