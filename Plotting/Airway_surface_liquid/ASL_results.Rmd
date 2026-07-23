@@ -19,7 +19,7 @@ library(stringr) # String manipulation to get Index names
 
 # Files and directories
 input_dir <- paste0(getwd(), "/data/")
-output_dir <- paste0(getwd(), "/../produced_plots/Apical_fluid/")
+output_dir <- paste0(getwd(), "/../produced_plots/Airway_surface_liquid/")
 pre_results_file <- "4x_pre_results.rda"
 post_results_file <- "4x_post_results.rda"
 colours_file <- "colours.csv"
@@ -139,7 +139,7 @@ area_data %>%
   ggplot(aes(x = Donor, y = sum_area, fill = Sample)) +
   geom_boxplot() +
   labs(
-    title = "Apical surface fluid (sum intensity values)",
+    #title = "Apical surface fluid (sum intensity values)",
     x = "Donor",
     y = "Sum intensity values"
   ) +
@@ -178,7 +178,7 @@ area_data %>%
   ggplot(aes(x = Donor, y = sigmoid_area, fill = Sample)) +
   geom_boxplot() +
   labs(
-    title = "Apical surface fluid (sigmoid integration values)",
+    #title = "Apical surface fluid (sigmoid integration values)",
     x = "Donor",
     y = "Sigmoid integration values"
   ) +
@@ -217,7 +217,7 @@ area_data %>%
   ggplot(aes(x = Donor, y = sigmoid_RMSE, fill = Sample)) +
   geom_boxplot() +
   labs(
-    title = "Sigmoid curve RMSE values",
+    #title = "Sigmoid curve RMSE values",
     x = "Donor",
     y = "Sigmoid RMSE values"
   ) +
