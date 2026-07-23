@@ -87,7 +87,7 @@ cancer_data %>%
   ggplot(aes(x = reorder(Cancer_type, -Value), y = Value, fill = Cancer_type == "Lung & Trachea")) +
   geom_col() +
   labs(
-    title = "New Zealand cancer incidence rates, 2017",
+    #title = "New Zealand cancer incidence rates, 2017",
     x = "Cancer type",
     y = "Age corrected cancer registration rate"
   ) +
@@ -116,7 +116,7 @@ cancer_data %>%
   ggplot(aes(x = reorder(Cancer_type, -Value), y = Value, fill = Cancer_type == "Lung & Trachea")) +
   geom_col() +
   labs(
-    title = "New Zealand cancer mortality rates, 2017",
+    #title = "New Zealand cancer mortality rates, 2017",
     x = "Cancer type",
     y = "Age corrected cancer mortality rate"
   ) +
@@ -230,7 +230,7 @@ ggsurvplot(fit,
   data = LUSC_TP53,
   pval = TRUE,
   risk.table = FALSE,
-  title = "Overall survival by TP53 expression (RNA seq)",
+  #title = "Overall survival by TP53 expression (RNA seq)",
   xlab = "Survival time (years)",
   legend = "right",
   legend.title = "TP53 expression",
