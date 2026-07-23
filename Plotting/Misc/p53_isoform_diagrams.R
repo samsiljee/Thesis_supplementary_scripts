@@ -62,7 +62,7 @@ library(drawProteins)
 library(ggplot2)
 
 # Set some directories
-output_dir <- paste0(getwd(), "/../produced_plots/Misc/")
+output_dir <- paste0(getwd(), "/Plotting/produced_plots/Misc/")
 
 # ============================================================
 # Define isoforms
@@ -233,8 +233,10 @@ p <- p +
 
 # Theme and labels
 p <- p +
-  ggtitle("Human p53 / TP53 isoforms") +
-  xlab("Amino acid position") +
+  labs(
+    #title = "Human p53 / TP53 isoforms",
+    x = "Amino acid position"
+  ) +
   theme_bw(base_size = 11) +
   theme(
     plot.title         = element_text(face = "bold", size = 13),
