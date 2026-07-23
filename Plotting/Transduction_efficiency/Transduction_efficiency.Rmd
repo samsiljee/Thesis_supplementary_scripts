@@ -17,7 +17,7 @@ library(rstatix) # ANOVA testing
 
 # Files and directories
 input_dir <- paste0(getwd(), "/data/")
-output_dir <- paste0(getwd(), "/../produced_plots/dose-response/")
+output_dir <- paste0(getwd(), "/../produced_plots/Transduction_efficiency/")
 
 # Read in data processed in the Data_processing script
 load(paste0(input_dir, "incucyte_data.rda"))
@@ -109,41 +109,12 @@ HEK_21_097_data %>%
   labs(
     x = "Volume lentivirus media added (log scale)",
     y = "Ratio of area GFP+",
-    title = "Transduction efficiency at 72 hours"
+    #title = "Transduction efficiency at 72 hours"
   ) +
   theme_bw() +
   scale_colour_manual(name = "Donor", values = custom_colours)
 
 ggsave(paste0(output_dir, "HEK 293T17 21_097 dose response.png"), width = 8, height = 5.5)
-```
-
-## Plot primary dose response curves
-Plot demonstrating reproducibility of HEK vs primary cells, also showing similarity of different primary cells
-```{r}
-# Create plot
-incucyte_data %>%
-  filter(
-    Donor %in% c("20-241", "21-073", "21-097", "22-091", "22-111", "22-115") &
-      Dose != 0 &
-      Vector == "pLVUHshp53"
-  ) %>%
-  group_by(Donor, Dose, Elapsed) %>%
-  summarise(SD = sd(Ratio, na.rm = TRUE), Ratio = mean(Ratio)) %>%
-  ggplot(aes(x = Dose, y = Ratio, ymin = Ratio - SD, ymax = Ratio + SD, col = Donor)) +
-  geom_point(size = 3, alpha = 0.5) +
-  geom_errorbar(width = 0.1) +
-  facet_wrap("Elapsed") +
-  geom_line() +
-  scale_x_continuous(trans = "log2", breaks = c(500, 200, 100, 50, 20, 10, 5, 1)) +
-  labs(
-    x = "Volume lentivirus media added (log scale)",
-    y = "Ratio of area GFP+",
-    title = "Transduction efficiency at 48 hours"
-  ) +
-  theme_bw() +
-  scale_colour_manual(name = "Donor", values = custom_colours)
-
-ggsave(paste0(output_dir, "Primary cells dose response.png"), width = 8, height = 5.5)
 ```
 
 ## eGPF expression over time
@@ -177,9 +148,9 @@ ALI_data %>%
   geom_boxplot() +
   facet_grid(Vector ~ Day) +
   labs(
+    #title = "eGFP expression during 2D ALI culture",
     x = "Donor",
-    y = "Ratio of area GFP+",
-    title = "eGFP expression during 2D ALI culture"
+    y = "Ratio of area GFP+"
   ) +
   theme_bw() +
   scale_fill_manual(name = "Sample", values = custom_colours) +
