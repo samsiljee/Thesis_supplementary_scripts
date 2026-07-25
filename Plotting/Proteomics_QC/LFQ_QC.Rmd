@@ -30,7 +30,6 @@ output_dir <- paste0(getwd(), "/../produced_plots/Proteomics_QC/LFQ/")
 plot_width <- 8
 plot_height <- 5.5
 annotations_file <- "run_annotations.tsv"
-final_proteins_file <- "LFQ_TMT_common_differential_proteins.txt"
 sample_prep_file <- "sample_prep.csv"
 Gene_symbol_map <- "gene_symbol_map.tsv"
 
@@ -241,12 +240,6 @@ if (load_from_rda) {
   }
 }
 
-# Read in list of final proteins of interest
-final_proteins <- readLines(paste0(input_dir, final_proteins_file))
-
-# Load the gene symbols map
-gene_symbols_map <- read.delim(paste0(input_dir, Gene_symbol_map), header = TRUE, sep = "\t")
-
 # Load sample pre data
 sample_prep_data <- read.delim(paste0(input_dir, sample_prep_file), header = TRUE, sep = ",") %>%
   merge(
@@ -322,6 +315,7 @@ sample_prep_data %>%
     ymax = Yield + Yield.SD),
     width = 0.2) +
   labs(
+    subtitle = paste0("paired t-test, p = ", round(yield_test$p.value, 3)),
     x = "Sample",
     y = "Yield +/- standard deviation",
     # title = "Yield by sample"
@@ -330,7 +324,6 @@ sample_prep_data %>%
     labels = scales::percent,
     limits = c(0, 1)
   ) +
-  annotate("text", x = 3, y = 1, label = paste0("paired t-test, p = ", round(yield_test$p.value, 3))) +
   theme_bw() +
   theme(
     legend.position = "none",
@@ -673,9 +666,11 @@ round(mean(ID_counts$Protein_count))
 ID_counts %>%
   ggplot(aes(x = Sample, y = Protein_count, col = Batch)) +
   geom_point() +
-  annotate("text", x = 3, y = 5000, label = paste0("ANOVA, p = ", round(ID_test$p, 3))) +
   expand_limits(y = 0) +
-  ggtitle("Identifications by run") +
+  labs(
+    # title = "Identifications by run",
+    subtitle = paste0("ANOVA, p = ", round(ID_test$p, 3))
+    ) +
   theme_bw() +
   theme(
     axis.text.x = element_text(angle = 90, vjust = 0, hjust = 1)
@@ -833,7 +828,8 @@ heatmap_data %>%
     x = "Sample",
     y = "Protein",
     fill = "Identified",
-    # title = "Protein identification missing values") +
+    # title = "Protein identification missing values"
+    ) +
   theme(
     axis.text.x = element_text(angle = 90),
     axis.text.y = element_blank(),
@@ -1044,58 +1040,4 @@ Proteins %>%
 
 # Save the plot
 ggsave(paste0(output_dir, "LFQ SEQUEST scores.png"), width = plot_width, height = plot_height)
-```
-
-## UNUSED CODES
-Codes for older plots, no longer required.
-
-## PTM distribution
-Code to test out the distribution of PTMs found in the PSMs. Used to justify which to include in the final search.
-```{r PTM distribution}
-# Load list of searched modifications
-modifications_list <- readLines("data/modifications_list.txt")
-# Load the data - select modifications
-modifications_data <- vroom("data/PTM_optimistation_PSMs.txt") %>% .$Modifications
-# Get total numbers for ratio calculations
-number_of_PSMs <- length(modifications_data)
-# Calculate the numbers of times that modifications occur
-# Do the counting
-counts <- numeric()
-for (i in modifications_list) {
-  count <- sum(grepl(i, modifications_data))
-  counts <- c(counts, count)
-}
-# Make a data frame and plot
-data.frame(
-  Modification = modifications_list,
-  Proportion = counts / number_of_PSMs
-) %>%
-  ggplot(aes(x = Modification, y = Proportion, fill = Modification)) +
-  geom_col() +
-  ggtitle("Rates of modification of PSMs by modification") +
-  theme_bw() +
-  theme(legend.position = "none")
-
-# Save the plot
-ggsave(paste0(output_dir, "modifications.png"), width = plot_width, height = plot_height)
-```
-
-## Identification Efficiency
-```{r identification efficiency, echo = FALSE}
-# Count PSMs
-TotalPSMs <- PSMs %>%
-  group_by(`Spectrum File`) %>%
-  summarise(PSMs = n())
-
-# Count spectra
-TotalSpectra <- MSMSSpectrumInfo %>%
-  group_by(`Spectrum File`) %>%
-  summarise(Spectra = n())
-
-# Combine and calculate
-EfficiencyTab <- merge(TotalPSMs, TotalSpectra, by = "Spectrum File") %>%
-  mutate("Identification rate" = paste(round(PSMs / Spectra * 100, 1), "%"))
-
-# Display as table
-knitr::kable(EfficiencyTab)
 ```
