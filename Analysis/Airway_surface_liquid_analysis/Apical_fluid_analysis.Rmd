@@ -118,7 +118,7 @@ for (i in 1:nrow(annotations)) {
     geom_line() +
     coord_flip() +
     labs(
-      title = paste("Calcualted offset values for image ", ID),
+      # title = paste("Calcualted offset values for image ", ID),
       x = "Image row",
       y = "Row offset value"
     ) +
@@ -187,7 +187,7 @@ for (i in 1:nrow(annotations)) {
     geom_vline(xintercept = Max_intensity_cutoff, col = "blue") +
     scale_y_reverse() +
     labs(
-      title = paste("Aligned column mean intensity:", ID),
+      # title = paste("Aligned column mean intensity:", ID),
       x = "Radial distance (pixels)",
       y = "Mean intensity"
     ) +
