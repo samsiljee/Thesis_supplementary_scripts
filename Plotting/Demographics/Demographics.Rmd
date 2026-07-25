@@ -16,7 +16,7 @@ library(readxl)
 
 # Files and directories
 input_dir <- paste0(getwd(), "/data/")
-output_dir <- paste0(getwd(), "/../produced_plots/demographics/")
+output_dir <- paste0(getwd(), "/../produced_plots/Demographics/")
 clinical_data_file <- "lung_patient_clinical_data_summary.xlsx"
 ```
 
@@ -91,19 +91,24 @@ dat %>%
   theme(axis.text.x = element_text(angle = 60, vjust = 0.5),
         axis.title.x=element_blank(),
         legend.position = "none") +
-  ggtitle("Donor ethnicity")
+  labs(
+    # title = "Donor ethnicity"
+    )
 # And saving
-ggsave("produced_plots/demographics/ethnicity.png", width = 8, height = 5.5)
+ggsave(paste0(output_dir, "ethnicity.png"), width = 8, height = 5.5)
 
 # Plot ages
 dat %>%
   ggplot(aes(x = Age)) +
   theme_bw() +
   geom_histogram(binwidth = 5, col = "black", fill = "darkblue", alpha = 0.5) +
-  ylab("Count") +
-  ggtitle("Age of donors")
+  labs(
+    # title = "Age of donors",
+    y = "Count"
+    )
+
 # And saving
-ggsave("produced_plots/demographics/age_histogram.png", width = 8, height = 5.5)
+ggsave(paste0(output_dir, "age_histogram.png"), width = 8, height = 5.5)
 
 # Density plot of ages by sex
 dat %>%
@@ -111,9 +116,13 @@ dat %>%
   theme_bw() +
   # geom_histogram(position = "identity", binwidth = 2, col = "black", alpha = 0.5) +
   geom_density(alpha = 0.5) +
-  ggtitle("Donor age by sex")
+  labs(
+    # title = "Donor age by sex",
+    y = "Density"
+    )
+
 # And saving
-ggsave("produced_plots/demographics/age_by_sex_density.png", width = 8, height = 5.5)
+ggsave(paste0(output_dir, "age_by_sex_density.png"), width = 8, height = 5.5)
 
 # Plot site
 dat %>%
@@ -131,9 +140,12 @@ dat %>%
   theme(axis.text.x = element_text(angle = 60, vjust = 0.5),
         axis.title.x=element_blank(),
         legend.position = "none") +
-  ggtitle("Site of tissue collected")
+  labs(
+    # title = "Site of tissue collected"
+    )
+
 # And saving
-ggsave("produced_plots/demographics/tissue_site.png", width = 8, height = 5.5)
+ggsave(paste0(output_dir, "tissue_site.png"), width = 8, height = 5.5)
 
 # Plot diagnosis
 dat %>%
@@ -146,7 +158,10 @@ dat %>%
   theme(axis.text.x = element_text(angle = 60, vjust = 0.5),
         axis.title.x=element_blank(),
         legend.position = "none") +
-  ggtitle("Diagnosis")
+  labs(
+    # title = "Diagnosis"
+    )
+
 # And saving
-ggsave("produced_plots/demographics/diagnosis.png", width = 8, height = 5.5)
+ggsave(paste0(output_dir, "diagnosis.png"), width = 8, height = 5.5)
 ```
