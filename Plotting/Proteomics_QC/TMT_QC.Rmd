@@ -27,17 +27,16 @@ library(ggpubr) # Add stats to plots
 
 # Set some variables
 load_from_rda <- TRUE
-run_chromatograms <- FALSE
+run_chromatograms <- TRUE
 plot_width <- 8
 plot_height <- 5.5
 input_dir <- paste0(getwd(), "/data/TMT/")
 efficiency_dir <- paste0(getwd(), "/data/TMT_labelling_efficiency/")
 overlabelling_dir <- paste0(getwd(), "/data/TMT_overlabelling/")
 mixing_dir <- paste0(getwd(), "/data/TMT_mixing_ratio/")
-output_dir <- paste0(getwd(), "/../produced_plots/MS_QC/TMT/")
+output_dir <- paste0(getwd(), "/../produced_plots/Proteomics_QC/TMT/")
 run_annotations_file <- "run_annotations.tsv"
 channel_annotations_file <- "channel_annotations.tsv"
-final_proteins_file <- "LFQ_TMT_common_differential_proteins.txt"
 Gene_symbol_map <- "gene_symbol_map_manually_added.tsv"
 channels_vector <- c(
   "126",
@@ -185,12 +184,6 @@ if (load_from_rda) {
     save(chrom_data, file = paste0(input_dir, "chrom_data.rda"))
   }
 }
-
-# Read in list of final proteins of interest
-final_proteins <- readLines(paste0(input_dir, final_proteins_file))
-
-# Load the gene symbols map
-gene_symbols_map <- read.delim(paste0(input_dir, Gene_symbol_map), header = TRUE, sep = "\t")
 
 # Calculate GRAVY score for fractionation testing
 PSMs <- PSMs %>%
@@ -343,7 +336,8 @@ Efficiency_PSMs %>%
   labs(
     x = "Fraction",
     y = "Percent tagged",
-    title = "TMT labelling efficiency") +
+    # title = "TMT labelling efficiency"
+    ) +
   theme_bw() +
   theme(legend.position = "none")
 
@@ -369,7 +363,8 @@ labelling_summary %>%
   labs(
     x = "Sample",
     y = "Proportion of reporter ion missing values",
-    title = "Reporter ion missing values by sample") +
+    # title = "Reporter ion missing values by sample"
+    ) +
   theme_bw() +
   theme(
     legend.position = "none",
@@ -428,8 +423,10 @@ HSTY_summary %>%
   scale_y_continuous(
     labels = function(x) paste0(x * 100, "%")
   ) +
-  labs(x = "Fraction", y = "Proportion tagged") +
-  ggtitle("TMTpro over labelling") +
+  labs(
+    # title = "TMTpro over labelling",
+    x = "Fraction",
+    y = "Proportion tagged") +
   theme_bw() +
   theme(legend.position = "none")
 
@@ -458,7 +455,7 @@ Mixing_abundances %>%
   ggplot(aes(x = Channel, y = `Sum abundances`, fill = Channel)) +
   geom_col() +
   labs(
-    title = "Sum of PSM channel abundances",
+    # title = "Sum of PSM channel abundances",
     x = "Channel",
     y = "Sum reporter ion abundance"
   ) +
@@ -486,7 +483,7 @@ Channel_abundances %>%
   ggplot(aes(x = Channel, y = `Sum abundances`, fill = Channel)) +
   geom_col() +
   labs(
-    title = "Sum of PSM channel abundances",
+    # title = "Sum of PSM channel abundances",
     x = "Channel",
     y = "Sum reporter ion abundance"
   ) +
@@ -521,7 +518,7 @@ PSMs %>%
   labs(
     x = "GRAVY index (Kyte-Doolittle scoring)",
     y = NULL,
-    title = "Peptide hydrophobicity by fraction"
+    # title = "Peptide hydrophobicity by fraction"
   ) +
   theme_bw() +
   theme(
@@ -550,8 +547,10 @@ PSMs %>%
     name = "Peptide-spectrum matches",
     breaks = NULL
   ) +
-  labs(x = "Retention time (minutes)") +
-  ggtitle("PSMs by retention time") +
+  labs(
+    # title = "PSMs by retention time",
+    x = "Retention time (minutes)"
+    ) +
   theme_bw() +
   theme(
     axis.text.y = element_blank(),
@@ -614,7 +613,7 @@ upset(
     min_degree = 1
 ) +
   labs(
-    title = "Peptide group identification numbers by fraction"
+    # title = "Peptide group identification numbers by fraction"
   )
 
 # Save the plot
@@ -637,7 +636,7 @@ if(run_chromatograms) {
     sec.axis = dup_axis(name = "Fraction", labels = NULL)
   ) +
     labs(
-      title = "Total ion current chromatograms for TMT runs",
+      # title = "Total ion current chromatograms for TMT runs",
       x = "Retention time",
       y = "Total ion current intensity"
     ) +
@@ -661,7 +660,7 @@ if(run_chromatograms) {
     sec.axis = dup_axis(name = "Fraction", labels = NULL)
   ) +
     labs(
-      title = "Base peak chromatograms for TMT runs",
+      # title = "Base peak chromatograms for TMT runs",
       x = "Retention time",
       y = "Base peak intensity"
     ) +
@@ -693,7 +692,7 @@ PSMs %>%
   ) +
   facet_grid(Fraction ~ Batch, scales = "free_y") +
   labs(
-    title = "PSMs by retention time for TMT runs",
+    # title = "PSMs by retention time for TMT runs",
     x = "Retention time",
     y = "PSM identifications"
   ) +
@@ -788,7 +787,7 @@ data.frame(
   ggplot(aes(x = RT, y = Intensity)) +
   geom_line() +
   labs(
-    title = "Extracted-ion chromatogram m/z: 427.2478",
+    # title = "Extracted-ion chromatogram m/z: 427.2478",
     x = "Retention time"
   ) +
   theme_bw() +
@@ -802,7 +801,7 @@ peak_widths %>%
   ggplot(aes(x = Batch, y = Peak_width, fill = Batch)) +
   geom_boxplot() +
   labs(
-    title = "Full width at half maximum (FWHM) peak width for label free quantification (LFQ) runs (VATVSLPR)",
+    # title = "Full width at half maximum (FWHM) peak width for label free quantification (LFQ) runs (VATVSLPR)",
     x = "Batch",
     y = "Peak width (seconds)"
   ) +
@@ -861,7 +860,7 @@ run_RT_means %>%
     sec.axis = dup_axis(name = "Fraction", labels = NULL)
   ) +
   labs(
-    title = "Peptide retention time differences by run",
+    # title = "Peptide retention time differences by run",
     x = "Peptide retention time difference relative to overall mean (minutes)",
     y = "Density"
   ) +
@@ -898,7 +897,9 @@ ID_counts %>%
   geom_point() +
   annotate("text", x = 2, y = 4000, label = paste0("ANOVA, p = ", round(ID_test$p, 3))) +
   expand_limits(y = 0) +
-  ggtitle("Identifications by run") +
+  labs(
+    # title = "Identifications by run"
+    ) +
   theme_bw()
 
 # Save the plot
@@ -947,7 +948,7 @@ PSMs %>%
     position = "bottom",
     sec.axis = dup_axis(name = "Fraction", labels = NULL)) +
   labs(
-    title = "Mass error - PSM level by run, TMT data",
+    # title = "Mass error - PSM level by run, TMT data",
     x = expression(~Delta ~ "m/z (Da)"),
     y = "Density") +
   facet_wrap("Fraction", scales = "free_y") +
@@ -970,7 +971,7 @@ PSMs %>%
     position = "bottom",
     sec.axis = dup_axis(name = "Fraction", labels = NULL)) +
   labs(
-    title = "Mass error - PSM level by run, TMT data",
+    # title = "Mass error - PSM level by run, TMT data",
     x = expression(~Delta ~ "m/z (ppm)"),
     y = "Density") +
   facet_wrap("Fraction", scales = "free_y") +
@@ -1098,7 +1099,8 @@ heatmap_data %>%
     x = "Sample",
     y = "Protein",
     fill = "Identified",
-    title = "TMT reporter ion missing values") +
+    # title = "TMT reporter ion missing values"
+    ) +
   theme(
     axis.text.x = element_text(angle = 90),
     axis.text.y = element_blank(),
@@ -1134,7 +1136,7 @@ rbind(
   labs(
     x = "Run",
     y = "Protein-level abundance",
-    title = "Protein level TMT protein abundances by run",
+    # title = "Protein level TMT protein abundances by run",
     fill = "Run"
   ) +
   theme_bw() +
@@ -1178,7 +1180,7 @@ charge_data %>%
   labs(
     x = "Precursor charge - label free quantification runs",
     y = "Proportion of PSMs",
-    title = "Precursor charge distribution"
+    # title = "Precursor charge distribution"
   ) +
   theme_bw() +
   theme(
@@ -1216,7 +1218,7 @@ peptide_lengths %>%
   labs(
     x = "Peptide length",
     y = "Proportion of PSMs",
-    title = "Peptide length - TMT runs"
+    # title = "Peptide length - TMT runs"
   ) +
   theme_bw() +
   theme(
@@ -1255,7 +1257,7 @@ unique_peptides %>%
   labs(
     x = "Number of unique peptides per protein",
     y = "Proportion of identified proteins",
-    title = "Protein unique peptide counts - TMT runs"
+    # title = "Protein unique peptide counts - TMT runs"
   ) +
   theme_bw() +
   theme(
@@ -1278,7 +1280,7 @@ Proteins %>%
   labs(
     x = "Protein sequence coverage (%)",
     y = "Density",
-    title = "Protein sequence coverage - TMT runs"
+    # title = "Protein sequence coverage - TMT runs"
   ) +
   theme_bw() +
   theme(
@@ -1302,7 +1304,7 @@ Proteins %>%
   labs(
     x = "Sequest HT score (log 2 scale)",
     y = "Density",
-    title = "Sequest HT scores - TMT runs"
+    # title = "Sequest HT scores - TMT runs"
   ) +
   theme_bw() +
   theme(
