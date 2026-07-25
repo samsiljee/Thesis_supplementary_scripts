@@ -25,8 +25,8 @@ library(rstatix) # Run ANOVA tests
 library(ggpubr) # Add significance to plots
 
 # Set output directory
-output_dir <- paste0(getwd(), "/../produced_plots/MS_QC/LFQ/")
 input_dir <- paste0(getwd(), "/data/LFQ/")
+output_dir <- paste0(getwd(), "/../produced_plots/Proteomics_QC/LFQ/")
 plot_width <- 8
 plot_height <- 5.5
 annotations_file <- "run_annotations.tsv"
@@ -35,7 +35,7 @@ sample_prep_file <- "sample_prep.csv"
 Gene_symbol_map <- "gene_symbol_map.tsv"
 
 # Options with running the script
-run_chromatograms <- FALSE
+run_chromatograms <- TRUE
 load_from_rda <- TRUE
 ```
 
@@ -324,7 +324,7 @@ sample_prep_data %>%
   labs(
     x = "Sample",
     y = "Yield +/- standard deviation",
-    title = "Yield by sample"
+    # title = "Yield by sample"
   ) +
   scale_y_continuous(
     labels = scales::percent,
@@ -395,7 +395,7 @@ PeptideGroups %>%
     sec.axis = dup_axis(name = "Number of missed cleavages", labels = NULL)
   ) +
   labs(
-    title = "Missed cleavages",
+    # title = "Missed cleavages",
     x = "Sample",
     y = "Proportion"
   ) +
@@ -424,7 +424,7 @@ if(run_chromatograms) {
       sec.axis = dup_axis(name = "Sample", labels = NULL)
     ) +
     labs(
-      title = "Total ion current chromatograms for LFQ runs",
+      # title = "Total ion current chromatograms for LFQ runs",
       x = "Retention time",
       y = "Total ion current intensity"
     ) +
@@ -449,7 +449,7 @@ if(run_chromatograms) {
       sec.axis = dup_axis(name = "Sample", labels = NULL)
     ) +
     labs(
-      title = "Base peak chromatograms for LFQ runs",
+      # title = "Base peak chromatograms for LFQ runs",
       x = "Retention time",
       y = "Base peak intensity"
     ) +
@@ -482,7 +482,7 @@ PSMs %>%
   ) +
   facet_grid(Sample ~ Batch, scales = "free_y") +
   labs(
-    title = "PSMs by retention time for LFQ runs",
+    # title = "PSMs by retention time for LFQ runs",
     x = "Retention time",
     y = "PSM identifications"
   ) +
@@ -567,7 +567,7 @@ data.frame(
   ggplot(aes(x = RT, y = Intensity)) +
   geom_line() +
   labs(
-    title = "Extracted-ion chromatogram m/z: 421.7584",
+    # title = "Extracted-ion chromatogram m/z: 421.7584",
     x = "Retention time"
   ) +
   theme_bw() +
@@ -584,7 +584,7 @@ peak_widths %>%
     method = "anova",
     aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
   labs(
-    title = "Full width at half maximum (FWHM) peak widths for peptide  \"VATVSLPR\" in LFQ runs by batch",
+    # title = "Full width at half maximum (FWHM) peak widths for peptide  \"VATVSLPR\" in LFQ runs by batch",
     x = "Batch",
     y = "Peak width (seconds)"
   ) +
@@ -638,7 +638,7 @@ run_RT_means %>%
   geom_density_ridges() +
   facet_wrap("Sample") +
   labs(
-    title = "Peptide retention time differences by run",
+    # title = "Peptide retention time differences by run",
     x = "Peptide retention time difference relative to overall mean (minutes)",
     y = "Density"
   ) +
@@ -724,7 +724,7 @@ PSMs %>%
   ggplot(aes(x = `Deltam/z [Da]`, colour = Batch)) +
   geom_density(alpha = 0.2) +
   labs(
-    title = "Mass error - PSM level by run, LFQ data",
+    # title = "Mass error - PSM level by run, LFQ data",
     x = expression(~Delta ~ "m/z (Da)"),
     y = "Density") +
   facet_wrap("Sample", scales = "free_y") +
@@ -743,7 +743,7 @@ PSMs %>%
   ggplot(aes(x = `DeltaM [ppm]`, colour = Batch)) +
   geom_density(alpha = 0.2) +
   labs(
-    title = "Mass error - PSM level by run, LFQ data",
+    # title = "Mass error - PSM level by run, LFQ data",
     x = expression(~Delta ~ "m/z (ppm)"),
     y = "Density") +
   facet_wrap("Sample", scales = "free_y") +
@@ -777,7 +777,7 @@ for(i in Run_annotations$Sample){
   ggVennDiagram(venn_list) +
     theme_void() +
     labs(
-      title = paste0(i, " technical replicate overlap")
+      # title = paste0(i, " technical replicate overlap")
       ) +
     ggplot2::scale_fill_gradient(low = "white", high = "red")
   
@@ -833,7 +833,7 @@ heatmap_data %>%
     x = "Sample",
     y = "Protein",
     fill = "Identified",
-    title = "Protein identification missing values") +
+    # title = "Protein identification missing values") +
   theme(
     axis.text.x = element_text(angle = 90),
     axis.text.y = element_blank(),
@@ -875,7 +875,7 @@ norm_data %>%
   labs(
     x = "Run",
     y = "Protein-level abundance",
-    title = "Protein level LFQ protein abundances by run",
+    # title = "Protein level LFQ protein abundances by run",
     fill = "Donor"
   ) +
   theme_bw() +
@@ -910,7 +910,7 @@ PSMs %>%
   labs(
     x = "Precursor charge",
     y = "Proportion of PSMs",
-    title = "LFQ precursor charge distribution"
+    # title = "LFQ precursor charge distribution"
   ) +
   theme_bw() +
   theme(
@@ -948,7 +948,7 @@ peptide_lengths %>%
   labs(
     x = "Peptide length",
     y = "Proportion of PSMs",
-    title = "Peptide length - LFQ runs"
+    # title = "Peptide length - LFQ runs"
   ) +
   theme_bw() +
   theme(
@@ -987,7 +987,7 @@ unique_peptides %>%
   labs(
     x = "Number of unique peptides per protein",
     y = "Proportion of identified proteins",
-    title = "Protein unique peptide counts - LFQ runs"
+    # title = "Protein unique peptide counts - LFQ runs"
   ) +
   theme_bw() +
   theme(
@@ -1010,7 +1010,7 @@ Proteins %>%
   labs(
     x = "Protein sequence coverage (%)",
     y = "Density",
-    title = "Protein sequence coverage - LFQ runs"
+    # title = "Protein sequence coverage - LFQ runs"
   ) +
   theme_bw() +
   theme(
@@ -1034,7 +1034,7 @@ Proteins %>%
   labs(
     x = "Sequest HT score (log 2 scale)",
     y = "Density",
-    title = "Sequest HT scores - LFQ runs"
+    # title = "Sequest HT scores - LFQ runs"
   ) +
   theme_bw() +
   theme(
