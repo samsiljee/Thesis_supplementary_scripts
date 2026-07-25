@@ -25,13 +25,13 @@ plot_height <- 5.5
 use_summarised_results <- FALSE
 if(use_summarised_results) {
   input_dir <- paste0(getwd(), "/data/")
-  output_dir <- paste0(getwd(), "/../produced_plots/MS_QC/sample_prep/")
+  output_dir <- paste0(getwd(), "/../produced_plots/Proteomics_QC/sample_prep/")
   digest_desalting_file <- "desalting_digestion.tsv"
 } else {
   load_from_rda <- TRUE
   annotations_file <- "optimisation_annotations.tsv"
-  input_dir <- paste0(getwd(), "/data/sample_prep_optimisation/")
-  output_dir <- paste0(getwd(), "/../produced_plots/MS_QC/sample_prep/")
+  input_dir <- paste0(getwd(), "/data/sample_prep/")
+  output_dir <- paste0(getwd(), "/../produced_plots/Proteomics_QC/sample_prep/")
 }
 ```
 
@@ -218,7 +218,7 @@ lysate_dat %>%
     method = "anova",
     aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
   labs(
-    title = "Lysis method concentrations",
+    # title = "Lysis method concentrations",
     x = "Lysis method",
     y = "Protein concentration (\u03bcg/mL)"
   ) +
@@ -246,7 +246,7 @@ Run_summary %>%
     aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
   facet_wrap("Measure", scales = "free_y") +
   labs(
-    title = "Identification numbers by digestion method",
+    # title = "Identification numbers by digestion method",
     x = "Digestion method",
     y = "Identification numbers"
   ) +
@@ -280,7 +280,7 @@ missed_cleavages_summary %>%
     sec.axis = dup_axis(name = "Number of missed cleavages", labels = NULL)
   ) +
   labs(
-    title = "Missed cleavages by digestion method",
+    # title = "Missed cleavages by digestion method",
     x = "Digestion method",
     y = "Proportion"
   ) +
@@ -308,7 +308,7 @@ Run_summary %>%
     aes(label = paste0("Anova, p = ", signif(after_stat(p), 3)))) +
   facet_wrap("Measure", scales = "free_y") +
   labs(
-    title = "Identification numbers by desalting method",
+    # title = "Identification numbers by desalting method",
     x = "Desalting method",
     y = "Identification numbers"
   ) +
@@ -326,6 +326,6 @@ merge(
   by = c("Run", "Enzyme")
 ) %>%
   mutate(Run = Sample, "Fully_tryptic" = paste0(round(Percent, digits = 3) * 100, "%")) %>%
-  select(Run, Enzyme, Desalting, PSMs, `Protein groups`, Fully_tryptic) %>%
+  dplyr::select(Run, Enzyme, Desalting, PSMs, `Protein groups`, Fully_tryptic) %>%
   write.csv(paste0(output_dir, "optimisation_summary.csv"))
 ```
