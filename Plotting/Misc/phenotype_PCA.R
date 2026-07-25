@@ -56,6 +56,7 @@ merge(
   geom_point() +
   stat_ellipse(aes(group = Condition)) +
   labs(
+    # title = "PCA plot - phenotype metrics",
     x = paste0(
       "PC1 (",
       round(summary(phenotype_PCA)$importance[2, 1] * 100, digits = 1),
@@ -66,7 +67,6 @@ merge(
       round(summary(phenotype_PCA)$importance[2, 2] * 100, digits = 1),
       "%)"
     ),
-    title = "PCA plot - phenotype metrics",
     color = "Condition",
     shape = "Donor"
   ) +
