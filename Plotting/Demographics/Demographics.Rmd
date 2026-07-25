@@ -97,19 +97,6 @@ dat %>%
 # And saving
 ggsave(paste0(output_dir, "ethnicity.png"), width = 8, height = 5.5)
 
-# Plot ages
-dat %>%
-  ggplot(aes(x = Age)) +
-  theme_bw() +
-  geom_histogram(binwidth = 5, col = "black", fill = "darkblue", alpha = 0.5) +
-  labs(
-    # title = "Age of donors",
-    y = "Count"
-    )
-
-# And saving
-ggsave(paste0(output_dir, "age_histogram.png"), width = 8, height = 5.5)
-
 # Density plot of ages by sex
 dat %>%
   ggplot(aes(x = Age, fill = Sex)) +
