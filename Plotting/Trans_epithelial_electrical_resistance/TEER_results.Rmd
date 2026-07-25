@@ -25,7 +25,6 @@ colours_file <- "colours.csv"
 phenotype_summary_path <- paste0(input_dir, "../../Misc/data/phenotype_summary.csv")
 ```
 
-
 ## Load the data
 ```{r Load the data}
 # Read in annotations
@@ -50,6 +49,7 @@ dat_summarised <- TEER_data %>%
   summarize(SD = sd(TEER), TEER = mean(TEER)) %>%
   as.data.frame()
 ```
+
 # Add to phenotype data
 Summarise and add to the phenotype data
 ```{r}
@@ -293,7 +293,7 @@ names(cust_labels) <- 7*1:4
 # Create chart
 dat_summarised %>%
   ggplot(aes(x = Condition, y = TEER, ymax = TEER + SD, ymin = TEER - SD, col = Donor)) +
-  geom_boxplot(aes(x = Condition, y = TEER, col = Condition)) +
+  geom_boxplot(aes(x = Condition, y = TEER), col = "black") +
   geom_point(size = 3) +
   geom_errorbar(alpha = 0.5, width = 0.07) +
   geom_line(aes(x = as.numeric(Condition), y = TEER)) +
@@ -302,9 +302,10 @@ dat_summarised %>%
     labeller = as_labeller(cust_labels),
     nrow = 1) +
   labs(
+    # title = "TEER values by day post airlift",
     x = "Lentivirus vector",
-    y = expression("TEER (" ~ Omega * cm^2 ~ ")"),
-    title = "TEER values by day post airlift") +
+    y = expression("TEER (" ~ Omega * cm^2 ~ ")")
+    ) +
   theme_bw() +
   theme(strip.background = element_blank()) +
   scale_colour_manual(name = "Donor", values = custom_colours)
