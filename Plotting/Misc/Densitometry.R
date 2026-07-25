@@ -23,9 +23,9 @@ densitometry %>%
     ggplot(aes(x = Sample, y = Densitometry.area, fill = Donor)) +
     geom_col() +
     labs(
+        # title = "p53 knockdown validation",
         x = "Sample",
-        y = "Densitometry area",
-        title = "p53 knockdown validation"
+        y = "Densitometry area"
     ) +
     theme_bw() +
     scale_fill_manual(name = "Donor", values = custom_colours) +
