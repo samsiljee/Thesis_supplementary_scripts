@@ -21,11 +21,11 @@ library(Peptides) # for calculating GRAVY scores
 
 # Set some variables
 load_from_rda <- TRUE
-run_chromatograms <- FALSE
+run_chromatograms <- TRUE
 plot_width <- 8
 plot_height <- 5.5
 input_dir <- paste0(getwd(), "/data/Phos/")
-output_dir <- paste0(getwd(), "/../produced_plots/MS_QC/Phos/")
+output_dir <- paste0(getwd(), "/../produced_plots/Proteomics_QC/Phos/")
 channels_vector <- c(
   "126",
   paste0(rep(127:134, each = 2), c("N", "C")),
@@ -179,7 +179,7 @@ if(run_chromatograms) {
     geom_line() +
     facet_wrap("Run", ncol = 1) +
     labs(
-      title = "Total ion current chromatograms for phosphoproteomics runs",
+      # title = "Total ion current chromatograms for phosphoproteomics runs",
       x = "Retention time"
     ) +
     theme_bw() +
@@ -194,7 +194,7 @@ if(run_chromatograms) {
     geom_line() +
     facet_wrap("Run", ncol = 1) +
     labs(
-      title = "Base peak chromatograms for phosphoproteomics runs",
+      # title = "Base peak chromatograms for phosphoproteomics runs",
       x = "Retention time"
     ) +
     theme_bw() +
@@ -214,7 +214,7 @@ PSMs %>%
   geom_density() +
   facet_wrap("Run", ncol = 1) +
   labs(
-    title = "PSMs by retention time for phosphoproteomics runs",
+    # title = "PSMs by retention time for phosphoproteomics runs",
     x = "Retention time",
     y = "PSM identifications"
   ) +
@@ -296,7 +296,7 @@ Phosphosite_summary %>%
   labs(
     x = "Phosphosite counts by protein",
     y = "Proportion of identified proteins",
-    title = "Protein phosphosite count"
+    # title = "Protein phosphosite count"
   ) +
   theme_bw() +
   theme(
@@ -320,7 +320,7 @@ PSMs %>%
     labels = function(x) paste0(x, "%")
   ) +
   labs(
-    title = "Phosphosite confidence scores",
+    # title = "Phosphosite confidence scores",
     x = "Site localisation confidence score (IMP-ptmRS)",
     y = "Density"
   ) +
@@ -334,168 +334,4 @@ ggsave(paste0(output_dir, "Phosphosite confidence scores.png"), width = plot_wid
 Using data from dynamic phosphrylation rate.
 ```{r}
 mean(grepl("Phospho", PSMs$Modifications))
-```
-
-# LEGACY CODE
-Code no longer needed currently, from previous analyses
-
-## Summarise details of the runs
-```{r Run summary table}
-# Count number of proteins per run
-PG_summary <- ProteinGroups %>%
-  group_by(Run) %>%
-  summarise("Protein groups" = length(unique(`Protein Groups Protein Group ID`)))
-
-# Count number of PSMs per run
-PSM_summary <- PSMs %>%
-  group_by(Run) %>%
-  summarise("PSMs" = n())
-
-# Count number of spectra per run
-MSMSSpectrumInfo_summary <- MSMSSpectrumInfo %>%
-  group_by(Run) %>%
-  summarise("Spectra" = n())
-
-# Count number of proteins per run
-Proteins_summary <- Proteins %>%
-  group_by(Run) %>%
-  summarise("Proteins" = n())
-
-# Count number of phosphosites per run
-Phosphosites_summary <- ModificationSites %>%
-  group_by(Run) %>%
-  summarise("Phosphosites" = n())
-
-# Combine with Run_annotations and select desired columns
-Run_summary <- merge(
-  PG_summary,
-  PSM_summary
-) %>%
-  merge(MSMSSpectrumInfo_summary) %>%
-  merge(Proteins_summary) %>%
-  merge(Phosphosites_summary) %>%
-  merge(Run_annotations) %>%
-  mutate("Identification rate" = PSMs / Spectra) %>%
-  dplyr::select(Run, Batch, Spectra, PSMs, `Identification rate`, `Protein groups`, Proteins, Phosphosites)
-
-# Save as .csv file
-write.csv(Run_summary, paste0(output_dir, "Run_summary.csv"))
-
-# Summarise some results
-range(Run_summary$Proteins)
-mean(Run_summary$Proteins)
-```
-
-## Venn diagrams
-Overview of protein overlaps between replicates of the same sample
-```{r venn diagrams}
-# List off unique proteins (by group description) for each fraction
-# venn_list_1 <- ProteinGroups %>%
-#   filter(Batch == 1) %>%
-#   split(.$Fraction) %>%
-#   lapply(function(df) {
-#     df %>%
-#       dplyr::select(`Group Description`) %>%
-#       pull()
-#   })
-# 
-# # make the plot for several combinations of fractions
-# ggVennDiagram(venn_list_1[1:4]) +
-#   theme_void() +
-#   ggtitle("Fraction identification overlap - fractions 1 to 4") +
-#   ggplot2::scale_fill_gradient(low="white",high = "red")
-# 
-# # Save the plot
-# ggsave(paste0(output_dir, "Batch 1 fraction replication venn diagram 1 to 4.png"), width = plot_width, height = plot_height)
-# 
-# # make the plot for several combinations of fractions
-# ggVennDiagram(venn_list_1[3:6]) +
-#   theme_void() +
-#   ggtitle("Fraction identification overlap - fractions 3 to 6") +
-#   ggplot2::scale_fill_gradient(low="white",high = "red")
-# 
-# # Save the plot
-# ggsave(paste0(output_dir, "Batch 1 fraction replication venn diagram 3 to 6.png"), width = plot_width, height = plot_height)
-# 
-# # make the plot for several combinations of fractions
-# ggVennDiagram(venn_list_1[5:8]) +
-#   theme_void() +
-#   ggtitle("Fraction identification overlap - fractions 5 to 8") +
-#   ggplot2::scale_fill_gradient(low="white",high = "red")
-# 
-# # Save the plot
-# ggsave(paste0(output_dir, "Batch 1 fraction replication venn diagram 5 to 8.png"), width = plot_width, height = plot_height)
-# 
-# # Venn diagrams for fraction overlap by batch
-# for (i in unique(Run_annotations$Fraction)) {
-#   venn_list <- ProteinGroups %>%
-#     filter(Fraction == i) %>%
-#     split(.$Batch) %>%
-#     lapply(function(df) {
-#       df %>%
-#         dplyr::select(`Group Description`) %>%
-#         pull()
-#     })
-# 
-#   # make the plot for several combinations of fractions
-#   ggVennDiagram(venn_list) +
-#     theme_void() +
-#     ggtitle(paste("Batch identification overlap - fraction", i)) +
-#     ggplot2::scale_fill_gradient(low="white",high = "red")
-# 
-#   # Save the plot
-#   ggsave(paste0(output_dir, "Fraction ", i, " batch replication venn diagram.png"), width = plot_width, height = plot_height)
-# }
-# 
-# # Top 3 runs Venn diagrams
-# 
-# # Venn diagrams for fraction overlap by top 3 batches - for fractions 1 - 6
-# for (i in 1:6) {
-#   venn_list <- list(
-#     "1" = filter(ProteinGroups, Fraction == i, Batch == 1)$`Group Description`,
-#     "3" = filter(ProteinGroups, Fraction == i, Batch == 3)$`Group Description`,
-#     "4" = filter(ProteinGroups, Fraction == i, Batch == 4)$`Group Description`
-#   )
-# 
-#   # make the plot for several combinations of fractions
-#   ggVennDiagram(venn_list) +
-#     theme_void() +
-#     ggtitle(paste("Batch identification overlap - fraction", i)) +
-#     ggplot2::scale_fill_gradient(low="white",high = "red")
-# 
-#   # Save the plot
-#   ggsave(paste0(output_dir, "Fraction ", i, " batch replication venn diagram top 3 runs.png"), width = plot_width, height = plot_height)
-# }
-# 
-# # Venn diagrams for fraction overlap by top 3 batches - for fraction 7
-# venn_list <- list(
-#   "1" = filter(ProteinGroups, Fraction == 7, Batch == 1)$`Group Description`,
-#   "2" = filter(ProteinGroups, Fraction == 7, Batch == 2)$`Group Description`,
-#   "4" = filter(ProteinGroups, Fraction == 7, Batch == 4)$`Group Description`
-# )
-# 
-# # make the plot for several combinations of fractions
-# ggVennDiagram(venn_list) +
-#   theme_void() +
-#   ggtitle("Batch identification overlap - fraction 7") +
-#   ggplot2::scale_fill_gradient(low="white",high = "red")
-# 
-# # Save the plot
-# ggsave(paste0(output_dir, "Fraction 7 batch replication venn diagram top 3 runs.png"), width = plot_width, height = plot_height)
-# 
-# # Venn diagrams for fraction overlap by top 3 batches - for fraction 8
-# venn_list <- list(
-#   "2" = filter(ProteinGroups, Fraction == 8, Batch == 2)$`Group Description`,
-#   "3" = filter(ProteinGroups, Fraction == 8, Batch == 3)$`Group Description`,
-#   "4" = filter(ProteinGroups, Fraction == 8, Batch == 4)$`Group Description`
-# )
-# 
-# # make the plot for several combinations of fractions
-# ggVennDiagram(venn_list) +
-#   theme_void() +
-#   ggtitle("Batch identification overlap - fraction 8") +
-#   ggplot2::scale_fill_gradient(low="white",high = "red")
-# 
-# # Save the plot
-# ggsave(paste0(output_dir, "Fraction 8 batch replication venn diagram top 3 runs.png"), width = plot_width, height = plot_height)
 ```
