@@ -34,7 +34,7 @@ library(gson) # read.gmt function
 log_2_FC_cutoff <- log2(1.3)
 adj_p_value_cutoff <- 0.05
 input_dir <- paste0(getwd(), "/data/Phos/")
-output_dir <- paste0(getwd(), "/../produced_plots/MS_results/Phos/")
+output_dir <- paste0(getwd(), "/../produced_plots/Proteomics_results/Phos/")
 
 # Files to load
 processed_file_protein <- "PTM_processed.rda"
@@ -351,7 +351,7 @@ results_phosphosite %>%
   labs(
     x = "Log 2 fold-change",
     y = "-Log10(adjusted p-value)",
-    title = "Volcano plot - Phosphosites"
+    # title = "Volcano plot - Phosphosites"
   ) +
   theme_bw()
 
@@ -368,7 +368,7 @@ results_protein %>%
   labs(
     x = "Log 2 fold-change",
     y = "-Log10(adjusted p-value)",
-    title = "Volcano plot - Phosphoproteins"
+    # title = "Volcano plot - Phosphoproteins"
   ) +
   theme_bw()
 
@@ -406,7 +406,9 @@ venn_list <- list(
 # make the plot
 ggVennDiagram(venn_list) +
   theme_void() +
-  ggtitle("Protein dataset overlap") +
+  labs(
+    # # title = "Protein dataset overlap"
+    ) +
   ggplot2::scale_fill_gradient(low = "white", high = "red")
 
 # Save the plot
@@ -457,7 +459,7 @@ PCA_data %>%
       round(summary(Phos_PCA)$importance[2, 2] * 100, digits = 1),
       "%)"
     ),
-    title = "PCA plot - Phosphosite data",
+    # title = "PCA plot - Phosphosite data",
     color = "Condition",
     shape = "Donor"
   ) +
@@ -476,7 +478,7 @@ data.frame(
   labs(
     x = "Principle component",
     y = "Proportion",
-    title = "Eigenvalue plot - top 15 principle components"
+    # title = "Eigenvalue plot - top 15 principle components"
   ) +
   theme_bw()
 
@@ -502,7 +504,7 @@ make_custom_heatmap(
   donor_annotations = str_split_i(colnames(phos_mat), "_", 1),
   na_col = "gray",
   annot_col = custom_colours,
-  column_title = "Phosphosite heatmap",
+  column_title = "",
   output_dir = output_dir,
   file_name = "Phos_heatmap_all_missing_values.png"
 )
@@ -515,7 +517,7 @@ make_custom_heatmap(
   condition_annotations = str_split_i(colnames(donor_phos_mat), "_", 2),
   donor_annotations = str_split_i(colnames(donor_phos_mat), "_", 1),
   annot_col = custom_colours,
-  column_title = "Phosphoproteomics donors - differential phosphosites",
+  column_title = "",
   output_dir = output_dir,
   file_name = "Phos_heatmap_filtered_by_donor.png"
 )
@@ -579,7 +581,7 @@ for (d in c("BP", "MF")) {
     ggplot(aes(x = Ratio, y = name, size = annotated, colour = evogo.pvalue)) +
     geom_point() +
     labs(
-      title = paste0("Top 15 enriched GO terms - ", d),
+      # title = paste0("Top 15 enriched GO terms - ", d),
       x = "Ratio",
       y = "GO term",
       colour = "evoGO algorithm p-value",
@@ -601,7 +603,7 @@ evoGO_results[["CC"]] %>%
   ggplot(aes(x = Ratio, y = name, size = annotated, colour = evogo.pvalue)) +
   geom_point() +
   labs(
-    title = paste0("Top 15 enriched GO terms - CC"),
+    # title = paste0("Top 15 enriched GO terms - CC"),
     x = "Ratio",
     y = "GO term",
     colour = "evoGO algorithm p-value",
@@ -687,7 +689,7 @@ for (pathway in top_pathways) {
     rankings_protein
   ) +
     labs(
-      title = str_replace_all(str_replace(str_to_upper(pathway), "Hallmark_", ""), "_", " "),
+      # title = str_replace_all(str_replace(str_to_upper(pathway), "Hallmark_", ""), "_", " "),
       x = "Rank",
       y = "Enrichment score (ES)"
     ) +
@@ -799,7 +801,7 @@ for (pathway in PTM_top_pathways) {
     PTM_rankings
   ) +
     labs(
-      title = str_replace_all(str_replace(str_to_upper(pathway), "Hallmark_", ""), "_", " "),
+      # title = str_replace_all(str_replace(str_to_upper(pathway), "Hallmark_", ""), "_", " "),
       x = "Rank",
       y = "Enrichment score (ES)"
     ) +
@@ -892,7 +894,7 @@ act_scores %>%
     midpoint = 0
   ) +
   labs(
-    title = "Top 30 altered kinases",
+    # title = "Top 30 altered kinases",
     x = "Kinase",
     y = "benchmarKIN z-score",
     fill = "z-score"
@@ -998,7 +1000,7 @@ kinase_res %>%
     midpoint = 0
   ) +
   labs(
-    title = "Top 30 altered kinases",
+    # title = "Top 30 altered kinases",
     x = "Kinase",
     y = "RokaiXplorer z-score",
     fill = "z-score"
@@ -1042,7 +1044,7 @@ phos_ORA %>%
   ggplot(aes(x = Ratio, y = name, size = annotated, colour = evogo.pvalue)) +
   geom_point() +
   labs(
-    title = paste0("Top 15 enriched GO terms - biological processes, inferred kinases"),
+    # title = paste0("Top 15 enriched GO terms - biological processes, inferred kinases"),
     x = "Ratio",
     y = "GO term",
     colour = "evoGO algorithm p-value",
@@ -1114,7 +1116,7 @@ merge(
   labs(
     x = "benchmarKIN z-score",
     y = "RokaiXplorer z-score",
-    title = "Kinase z-score correlation"
+    # title = "Kinase z-score correlation"
   ) +
   theme_bw()
 
