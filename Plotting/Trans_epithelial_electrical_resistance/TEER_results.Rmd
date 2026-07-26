@@ -99,6 +99,11 @@ for(d in unique(TEER_data$DayPostAirlift)) {
   }
 }
 SD_measures
+
+# Calculate percent reduction
+percent_reduced <- (mean(TEER_data$TEER[TEER_data$Condition == "pLL3.7"]) - mean(TEER_data$TEER[TEER_data$Condition == "pLVUHshp53"])) / mean(TEER_data$TEER[TEER_data$Condition == "pLL3.7"])
+
+round(percent_reduced * 100)
 ```
 
 # Stats
