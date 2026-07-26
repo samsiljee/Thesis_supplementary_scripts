@@ -240,7 +240,134 @@ membranes_data <- membranes_data %>%
   ))
 ```
 
-## Variation and normalisation
+## Stats and p-value correction
+Run stats for the different markers, and BH multiple hypothesis testing correction
+```{r}
+# p63 summary
+p63_summary <- nuclei_data %>%
+  filter(Negative_control == FALSE) %>%
+  group_by(Donor, Condition) %>%
+  summarize(
+    p63_mean = mean(p63_scaled, na.rm = TRUE),
+    p63_prop = mean(p63_scaled > p63_threshold, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Perform paired t-tests with proportion of positive cells
+p63_test <- t.test(
+  filter(p63_summary, Condition == "Control")$p63_prop,
+  filter(p63_summary, Condition == "p53 KD")$p63_prop,
+  paired = TRUE
+)
+
+# Summarise SCGB1A1
+SCGB1A1_quartiles <- cells_data %>%
+    filter(Negative_control == FALSE & eGFP_quartile != "Middle") %>%
+    group_by(Donor, Condition, eGFP_quartile) %>%
+    summarise(
+        SCGB1A1_scaled = mean(SCGB1A1_scaled, na.rm = TRUE)
+    ) %>%
+    pivot_wider(names_from = eGFP_quartile, values_from = SCGB1A1_scaled) %>%
+    mutate(Ratio = Upper / Lower)
+
+# Run paired t-test
+SCGB1A1_test <- t.test(
+    filter(SCGB1A1_quartiles, Condition == "Control")$Ratio,
+    filter(SCGB1A1_quartiles, Condition == "p53 KD")$Ratio,
+    paired = TRUE
+)
+
+# Make summaries
+MUC5AC_summary <- cells_data %>%
+    filter(Negative_control == FALSE) %>%
+    group_by(Donor, Condition) %>%
+    summarize(
+        MUC5AC_mean = mean(MUC5AC_scaled, na.rm = TRUE),
+        MUC5AC_prop = mean(MUC5AC_scaled > MUC5AC_threshold, na.rm = TRUE),
+        .groups = "drop"
+    )
+
+# Run paired t-test
+MUC5AC_test <- t.test(
+    filter(MUC5AC_summary, Condition == "Control")$MUC5AC_prop,
+    filter(MUC5AC_summary, Condition == "p53 KD")$MUC5AC_prop,
+    paired = TRUE
+)
+
+# Make summaries
+FOXJ1_summary <- nuclei_data %>%
+    filter(Negative_control == FALSE) %>%
+    group_by(Donor, Condition) %>%
+    summarize(
+        FOXJ1_mean = mean(FOXJ1_scaled, na.rm = TRUE),
+        FOXJ1_prop = mean(FOXJ1_scaled > FOXJ1_threshold, na.rm = TRUE),
+        .groups = "drop"
+    )
+
+# Perform paired t-tests with proportion of positive cells
+FOXJ1_test <- t.test(
+    filter(FOXJ1_summary, Condition == "Control")$FOXJ1_prop,
+    filter(FOXJ1_summary, Condition == "p53 KD")$FOXJ1_prop,
+    paired = TRUE
+)
+
+# Summarise E-cadherin
+Ecadherin_quartiles <- membranes_data %>%
+    filter(Negative_control == FALSE & eGFP_quartile != "Middle") %>%
+    group_by(Donor, Condition, eGFP_quartile) %>%
+    summarise(
+        Ecadherin_scaled = mean(Ecadherin_scaled, na.rm = TRUE)
+    ) %>%
+    pivot_wider(names_from = eGFP_quartile, values_from = Ecadherin_scaled) %>%
+    mutate(Ratio = Upper / Lower)
+
+# Run paired t-test
+Ecadherin_test <- t.test(
+    filter(Ecadherin_quartiles, Condition == "Control")$Ratio,
+    filter(Ecadherin_quartiles, Condition == "p53 KD")$Ratio,
+    paired = TRUE
+)
+
+# Density summaries
+density_data <- nuclei_data %>%
+  group_by(Sample, Donor, Condition, Experiment) %>%
+  summarise(nuclei_count = n()) %>%
+  mutate(nuclei_count = nuclei_count/image_area)
+
+density_summary <- density_data %>%
+  group_by(Donor, Condition) %>%
+  summarize(nuclei_count_mean = mean(nuclei_count), .groups = "drop")
+
+# Perform paired t-tests and print results
+Density_test <- t.test(
+  filter(density_summary, Condition == "Control")$nuclei_count_mean,
+  filter(density_summary, Condition == "p53 KD")$nuclei_count_mean,
+  paired = TRUE
+)
+
+# Run correction
+pvalues <- data.frame(
+  Marker = c("p63", "SCGB1A1", "MUC5AC", "FOXJ1", "Ecadherin", "Density"),
+  pvalue = c(
+    p63_test$p.value,
+    SCGB1A1_test$p.value,
+    MUC5AC_test$p.value,
+    FOXJ1_test$p.value,
+    Ecadherin_test$p.value,
+    Density_test$p.value
+  )
+) %>%
+  mutate(
+    adjusted_pvalue = paste0(
+      "adjusted p-value: ",
+      round(
+        p.adjust(pvalue, method = "BH"),
+        digits = 3)
+    )
+  )
+```
+
+## Variation and normalisation effects
 Combine FOXJ1 datasets and plot densities to demonstrate how taking ratio and subtracting background reduces some patient-patient variation
 ```{r Ratio effects}
 nuclei_data %>%
@@ -304,24 +431,6 @@ ggsave(paste0(output_dir, "DRAQ5 density.png"), width = plot_width, height = plo
 ## p63 proportions
 Plot of combined p63 slides
 ```{r p63 intensities}
-# Make summaries
-p63_summary <- nuclei_data %>%
-  filter(Negative_control == FALSE) %>%
-  group_by(Donor, Condition) %>%
-  summarize(
-    p63_mean = mean(p63_scaled, na.rm = TRUE),
-    p63_prop = mean(p63_scaled > p63_threshold, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-# Perform paired t-tests with proportion of positive cells
-p63_test_prop <- t.test(
-  filter(p63_summary, Condition == "Control")$p63_prop,
-  filter(p63_summary, Condition == "p53 KD")$p63_prop,
-  paired = TRUE
-)
-interpret_t_test(p63_test_prop, p63_summary, "p63_prop")
-
 # Print range of p63 positive proportion
 range(p63_summary$p63_prop)
 
@@ -359,10 +468,7 @@ nuclei_data %>%
   ) +
   labs(
     # title = "Proportion of p63 positive nuclei",
-    subtitle = paste0(
-      "p-value: ",
-      round(p63_test_prop$p.value, digits = 3)
-    ),
+    subtitle = pvalues[pvalues$Marker == "p63","adjusted_pvalue"],
     x = NULL,
     y = "p63 positive nuclei"
   ) +
@@ -420,38 +526,14 @@ ggsave(paste0(output_dir, "SCGB1A1 intensity distribution.png"), width = plot_wi
 
 ## SCGB1A1 quartile comparison
 ```{r}
-# Summarise the quartiles
-SCGB1A1_quartiles <- cells_data %>%
-    filter(Negative_control == FALSE & eGFP_quartile != "Middle") %>%
-    group_by(Donor, Condition, eGFP_quartile) %>%
-    summarise(
-        SCGB1A1_scaled = mean(SCGB1A1_scaled, na.rm = TRUE)
-    ) %>%
-    pivot_wider(names_from = eGFP_quartile, values_from = SCGB1A1_scaled) %>%
-    mutate(Ratio = Upper / Lower)
-
-# Run paired t-test
-SCGB1A1_ratio_t_result <- t.test(
-    filter(SCGB1A1_quartiles, Condition == "Control")$Ratio,
-    filter(SCGB1A1_quartiles, Condition == "p53 KD")$Ratio,
-    paired = TRUE
-)
-SCGB1A1_ratio_p_label <- paste0("p = ", signif(SCGB1A1_ratio_t_result$p.value, 3))
-
 # Plot quartile ratios
 SCGB1A1_quartiles %>%
     ggplot(aes(x = Condition, y = Ratio, col = Donor, group = Donor)) +
     geom_point(size = 3) +
     geom_line(aes(x = as.numeric(Condition), y = Ratio)) +
-    annotate(
-        "text",
-        x = 1.5,
-        y = max(SCGB1A1_quartiles$Ratio) * 1.05,
-        label = SCGB1A1_ratio_p_label,
-        size = 4
-    ) +
     labs(
         # title = "SCGB1A1 expression differences",
+      subtitle = pvalues[pvalues$Marker == "SCGB1A1","adjusted_pvalue"],
         x = "Experimental condition",
         y = "Ratio of SCGB1A1 intensity by eGFP quartile"
     ) +
@@ -464,35 +546,6 @@ ggsave(paste0(output_dir, "SCGB1A1_quartile_ratios.png"), width = plot_width, he
 
 ## MUC5AC proportions
 ```{r MUC5AC intensities}
-# Make summaries
-MUC5AC_summary <- cells_data %>%
-    filter(Negative_control == FALSE) %>%
-    group_by(Donor, Condition) %>%
-    summarize(
-        MUC5AC_mean = mean(MUC5AC_scaled, na.rm = TRUE),
-        MUC5AC_prop = mean(MUC5AC_scaled > MUC5AC_threshold, na.rm = TRUE),
-        .groups = "drop"
-    )
-
-# Perform paired t-tests and print results for corrected ratio values
-MUC5AC_test_mean <- t.test(
-    filter(MUC5AC_summary, Condition == "p53 KD")$MUC5AC_mean,
-    filter(MUC5AC_summary, Condition == "Control")$MUC5AC_mean,
-    paired = TRUE
-)
-interpret_t_test(MUC5AC_test_mean, MUC5AC_summary, "MUC5AC_mean")
-
-# Repeat but with proportion of positive cells rather than corrected ratios
-MUC5AC_test_prop <- t.test(
-    filter(MUC5AC_summary, Condition == "Control")$MUC5AC_prop,
-    filter(MUC5AC_summary, Condition == "p53 KD")$MUC5AC_prop,
-    paired = TRUE
-)
-interpret_t_test(MUC5AC_test_prop, MUC5AC_summary, "MUC5AC_prop")
-
-# Print range of MUC5AC positive proportion
-range(MUC5AC_summary$MUC5AC_prop)
-
 # Density plot of cellular MUC5AC intensity
 cells_data %>%
     filter(Negative_control == FALSE) %>%
@@ -527,10 +580,7 @@ cells_data %>%
     ) +
     labs(
         # title = "Proportion of MUC5AC positive cells",
-        subtitle = paste0(
-            "p-value: ",
-            round(MUC5AC_test_prop$p.value, digits = 3)
-        ),
+        subtitle = pvalues[pvalues$Marker == "MUC5AC","adjusted_pvalue"],
         x = NULL,
         y = "MUC5AC positive cells"
     ) +
@@ -544,27 +594,6 @@ ggsave(paste0(output_dir, "MUC5AC proportion positive cells.png"), width = plot_
 ## FOXJ1 proportions
 Plot of combined FOXJ1 slides
 ```{r FOXJ1 intensities}
-# Make summaries
-FOXJ1_summary <- nuclei_data %>%
-    filter(Negative_control == FALSE) %>%
-    group_by(Donor, Condition) %>%
-    summarize(
-        FOXJ1_mean = mean(FOXJ1_scaled, na.rm = TRUE),
-        FOXJ1_prop = mean(FOXJ1_scaled > FOXJ1_threshold, na.rm = TRUE),
-        .groups = "drop"
-    )
-
-# Perform paired t-tests with proportion of positive cells
-FOXJ1_test_prop <- t.test(
-    filter(FOXJ1_summary, Condition == "Control")$FOXJ1_prop,
-    filter(FOXJ1_summary, Condition == "p53 KD")$FOXJ1_prop,
-    paired = TRUE
-)
-interpret_t_test(FOXJ1_test_prop, FOXJ1_summary, "FOXJ1_prop")
-
-# Print range of FOXJ1 positive proportion
-range(FOXJ1_summary$FOXJ1_prop)
-
 # Density plot of nuclear FOXJ1 intensity
 nuclei_data %>%
     filter(Negative_control == FALSE) %>%
@@ -599,10 +628,7 @@ nuclei_data %>%
     ) +
     labs(
         # title = "Proportion of FOXJ1 positive nuclei",
-        subtitle = paste0(
-            "p-value: ",
-            round(FOXJ1_test_prop$p.value, digits = 3)
-        ),
+        subtitle = pvalues[pvalues$Marker == "FOXJ1","adjusted_pvalue"],
         x = NULL,
         y = "FOXJ1 positive nuclei"
     ) +
@@ -639,38 +665,14 @@ ggsave(paste0(output_dir, "Ecadherin intensity distribution.png"), width = plot_
 
 ## Ecadherin quartile comparison
 ```{r}
-# Summarise the quartiles
-Ecadherin_quartiles <- membranes_data %>%
-    filter(Negative_control == FALSE & eGFP_quartile != "Middle") %>%
-    group_by(Donor, Condition, eGFP_quartile) %>%
-    summarise(
-        Ecadherin_scaled = mean(Ecadherin_scaled, na.rm = TRUE)
-    ) %>%
-    pivot_wider(names_from = eGFP_quartile, values_from = Ecadherin_scaled) %>%
-    mutate(Ratio = Upper / Lower)
-
-# Run paired t-test
-Ecadherin_ratio_t_result <- t.test(
-    filter(Ecadherin_quartiles, Condition == "Control")$Ratio,
-    filter(Ecadherin_quartiles, Condition == "p53 KD")$Ratio,
-    paired = TRUE
-)
-Ecadherin_ratio_p_label <- paste0("p = ", signif(Ecadherin_ratio_t_result$p.value, 3))
-
 # Plot quartile ratios
 Ecadherin_quartiles %>%
     ggplot(aes(x = Condition, y = Ratio, col = Donor, group = Donor)) +
     geom_point(size = 3) +
     geom_line(aes(x = as.numeric(Condition), y = Ratio)) +
-    annotate(
-        "text",
-        x = 1.5,
-        y = max(Ecadherin_quartiles$Ratio) * 1.05,
-        label = Ecadherin_ratio_p_label,
-        size = 4
-    ) +
     labs(
         # title = "E-cadherin expression differences",
+        subtitle = pvalues[pvalues$Marker == "Ecadherin","adjusted_pvalue"],
         x = "Experimental condition",
         y = "Ratio of E-cadherin intensity by eGFP quartile"
     ) +
@@ -684,31 +686,13 @@ ggsave(paste0(output_dir, "Ecadherin_quartile_ratios.png"), width = plot_width, 
 ## Epithelial density
 Overall density as measured by nuclear counts per field of view
 ```{r epithelial density}
-# Make summaries
-density_data <- nuclei_data %>%
-  group_by(Sample, Donor, Condition, Experiment) %>%
-  summarise(nuclei_count = n()) %>%
-  mutate(nuclei_count = nuclei_count/image_area)
-
-density_summary <- density_data %>%
-  group_by(Donor, Condition) %>%
-  summarize(nuclei_count_mean = mean(nuclei_count), .groups = "drop")
-
-# Perform paired t-tests and print results
-density_test <- t.test(
-  filter(density_summary, Condition == "Control")$nuclei_count_mean,
-  filter(density_summary, Condition == "p53 KD")$nuclei_count_mean,
-  paired = TRUE
-)
-interpret_t_test(density_test, density_summary, "nuclei_count_mean")
-
 # Make a box-plot
 density_data %>%
   ggplot(aes(x = Donor, y = nuclei_count, fill = Sample)) +
   geom_boxplot() +
   labs(
     # title = "Cell density",
-    subtitle = paste0("p-value = ", round(density_test$p.value, digits = 3)),
+    subtitle = pvalues[pvalues$Marker == "Density","adjusted_pvalue"],
     x = "Donor",
     y = expression("Nuclei count per mm"^2)
   ) +
