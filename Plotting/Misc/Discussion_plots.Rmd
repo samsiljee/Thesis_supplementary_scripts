@@ -26,8 +26,8 @@ log_2_FC_cutoff <- log2(1.3)
 adj_p_value_cutoff <- 0.05
 
 # Files to load
-LFQ_data <- paste0(output_dir, "../MS_results/LFQ/differential_abundances_LFQ.csv")
-TMT_data <- paste0(output_dir, "../MS_results/TMT/differential_abundances_TMT.csv")
+LFQ_data <- paste0(input_dir, "LFQ_differential_abundances.csv")
+TMT_data <- paste0(input_dir, "TMT_differential_abundances.csv")
 ```
 
 ## Load the data
@@ -84,7 +84,7 @@ venn_list <- list(
 ggVennDiagram(venn_list) +
   theme_void() +
   labs(
-    title = paste0("LFQ and TMT dataset overlap")
+    # title = paste0("LFQ and TMT dataset overlap")
   ) +
   ggplot2::scale_fill_gradient(low = "white", high = "red")
 
@@ -108,7 +108,7 @@ prot_results %>%
   labs(
     x = "LFQ log2 fold change",
     y = "TMT log2 fold change",
-    title = "Proteomics fold change correlation"
+    # title = "Proteomics fold change correlation"
   ) +
   theme_bw()
 
@@ -128,7 +128,7 @@ prot_results %>%
   labs(
     x = "LFQ log2 fold change",
     y = "TMT log2 fold change",
-    title = "Proteomics significant fold change correlation"
+    # title = "Proteomics significant fold change correlation"
   ) +
   theme_bw()
 
